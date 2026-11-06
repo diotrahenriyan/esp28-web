@@ -44,7 +44,7 @@ async function run(mode, key, waitMs, act) {
   const page = await ctx.newPage();
   await page.route('https://maps.googleapis.com/**', (r) => r.fulfill({ contentType: 'text/javascript', body: stub(mode) }));
   await page.route('https://tile.openstreetmap.org/**', (r) => r.fulfill({ status: 204 }));
-  await page.addInitScript((k) => { if (k) localStorage.setItem('esp28.gkey', JSON.stringify(k)); }, key);
+  await page.addInitScript((k) => { if (k) localStorage.setItem('esp28.gkey', JSON.stringify(k)); localStorage.setItem('esp28.tab', '"map"'); }, key);
   await page.route('https://routes.googleapis.com/**', (r) => r.fulfill({ status: 403, contentType: 'application/json',
     body: JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', message: 'Requests from this Android client application <empty> are blocked.' } }) }));
   await page.route('https://places.googleapis.com/**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: '{"suggestions":[]}' }));
@@ -56,6 +56,7 @@ async function run(mode, key, waitMs, act) {
     leaflet: !!document.querySelector('#map.leaflet-container'),
     google: !!document.querySelector('.gm-stub'),
     gHeight: (document.getElementById('gmap') || { getBoundingClientRect: () => ({ height: -1 }) }).getBoundingClientRect().height,
+    mapHeight: document.getElementById('map').clientHeight,
     mapStyle: document.getElementById('map').getAttribute('style') || '',
     status: document.getElementById('status').textContent,
   }));
@@ -67,7 +68,7 @@ let r = await run('none', '', 1500);
 check('no key → OpenStreetMap', r.leaflet && !r.google && /Map: OpenStreetMap/.test(r.log));
 
 r = await run('ok', 'TESTKEY', 2000);
-check('good key → Google map stays, full height', r.gHeight >= 700 && r.google && !r.leaflet && /Map: Google/.test(r.log) && /tiles loaded/.test(r.log));
+check('good key → Google map stays, full height', r.gHeight > 200 && Math.abs(r.gHeight - r.mapHeight) < 2 && r.google && !r.leaflet && /Map: Google/.test(r.log) && /tiles loaded/.test(r.log));
 
 r = await run('authAfterLoad', 'TESTKEY', 2500);
 check('key rejected after load → falls back to OpenStreetMap', r.leaflet && !r.google, r.status);

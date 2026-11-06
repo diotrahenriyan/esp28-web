@@ -2,261 +2,175 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>ESP 2.8 Companion</title>
-<meta name="theme-color" content="#0B1319">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ESP 2.8 Diag</title>
+<meta name="theme-color" content="#111418">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
-<link rel="stylesheet" href="leaflet/leaflet.css">
-<link rel="stylesheet" href="theme.css?v=2.8-w0.6.0">
-<script src="leaflet/leaflet.js"></script>
+<link rel="stylesheet" href="app.css?v=2.8-w0.6.0">
 </head>
-<body data-tab="engine">
-  <!-- ================= Map tab: full-screen map, search on top, sheet at the bottom ================= -->
-  <div id="map" class="for-map"></div>
-  <div class="top for-map">
-    <div class="bar">
-      <input id="q" placeholder="Search a place" autocomplete="off" enterkeyhint="search" aria-label="Search a place">
-      <button class="round" id="btnMe" aria-label="Show my location"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7.5" fill="none"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
-    </div>
-    <div id="results"></div>
+<body data-tab="live">
+<header class="hdr">
+  <b class="name">ESP 2.8 Diag</b>
+  <span class="chip" id="chipCluster"><i></i>Cluster: <span id="pillCluster">off</span></span>
+  <span class="chip" id="chipCcu"><i></i>CCU: <span id="pillCcu">off</span></span>
+  <span class="chip mono" id="chipRate">0.0/s</span>
+  <span class="chip demo" id="demoTag" hidden>DEMO DATA</span>
+  <span class="grow"></span>
+  <button class="btn js-link" id="btnLink">Connect cluster</button>
+  <button class="btn" id="btnRecord"><span id="recLabel">Record</span></button>
+</header>
+<nav class="tabs" aria-label="Sections">
+  <button data-tab="live">Live</button><button data-tab="fields">Fields</button><button data-tab="raw">Raw</button>
+  <button data-tab="bike">Bike</button><button data-tab="map">Map</button><button data-tab="setup">Setup</button><button data-tab="log">Log</button>
+</nav>
+<div id="status" class="status" role="status">Not connected</div>
+
+<main>
+<!-- Live: key values, one cell each -->
+<section class="tab" id="tabLive">
+  <div class="fault" id="attention"><span id="attentionText">Fault status not read yet</span></div>
+  <div class="cells">
+    <div class="cell"><div class="k">Engine speed <em class="vs" data-k="rpm"></em></div><div class="v"><span id="vRpm">-</span> <small>rpm</small></div></div>
+    <div class="cell"><div class="k">Speed <em class="vs" data-k="speed"></em></div><div class="v"><span id="vSpeed">-</span> <small>km/h</small></div></div>
+    <div class="cell"><div class="k">Engine temperature <em class="vs" data-k="eng"></em></div><div class="v"><span id="vEng">-</span> <small>°C</small></div></div>
+    <div class="cell"><div class="k">Battery <em class="vs" data-k="batt"></em></div><div class="v"><span id="vBatt">-</span> <small>V</small></div></div>
+    <div class="cell"><div class="k">Throttle <em class="vs" data-k="thr"></em></div><div class="v"><span id="vThr">-</span> <small>%</small></div></div>
+    <div class="cell"><div class="k">Intake pressure <em class="vs" data-k="map"></em></div><div class="v"><span id="vMap">-</span> <small>kPa</small></div></div>
+    <div class="cell"><div class="k">Odometer</div><div class="v"><span id="vOdo">-</span> <small>km</small></div></div>
+    <div class="cell"><div class="k">Ignition timing <em class="vs" data-k="ign"></em></div><div class="v"><span id="vIgn">-</span> <small>°</small></div></div>
   </div>
-  <div class="sheet for-map">
-    <div class="grabber" aria-hidden="true"></div>
-    <div id="status" class="banner" role="status">Not connected</div>
-    <div class="row">
-      <button id="btnLink" class="cap">Connect cluster</button>
-      <button id="btnGps" class="cap secondary" disabled>Share GPS</button>
-    </div>
-    <div id="destBox" hidden>
-      <div class="dest" id="destName"></div>
-      <div class="dim" id="destInfo"></div>
-      <div id="routes"></div>
-      <div class="row">
-        <button id="btnSend" class="cap" disabled>Send route to cluster</button>
-        <button id="btnSave" class="cap secondary">Save place</button>
+  <p class="note" id="engEmpty"><span id="engEmptyWhy">Connect the cluster. The cluster connects to the Yamaha CCU and passes its data here.</span></p>
+</section>
+
+<!-- Fields: every decoded field, updated in place -->
+<section class="tab" id="tabFields">
+  <label class="inline"><input type="checkbox" id="showNotFitted"> Show fields this bike does not have</label>
+  <div class="scroll"><table class="grid" id="fieldTable">
+    <thead><tr><th>Field</th><th class="r">Value</th><th>Unit</th><th class="r opt">Min</th><th class="r opt">Max</th><th class="opt">Raw</th><th>Status</th></tr></thead>
+    <tbody id="fieldBody"><tr><td colspan="7" class="note">No data yet.</td></tr></tbody>
+  </table></div>
+</section>
+
+<!-- Raw: the last messages as received -->
+<section class="tab" id="tabRaw">
+  <div class="row"><button class="btn" id="btnRawPause">Pause</button><button class="btn" id="btnRawClear">Clear</button>
+    <label class="inline"><input type="checkbox" id="rawLiveOnly"> Hide live engine (0x55)</label></div>
+  <div class="scroll"><table class="grid mono" id="rawTable">
+    <thead><tr><th>Time</th><th>ID</th><th class="r">Bytes</th><th>Sum</th><th>Hex</th></tr></thead>
+    <tbody id="rawBody"></tbody>
+  </table></div>
+  <p class="note">Newest 100 of the last 200 CCU messages, newest first, redrawn twice a second. Sum: checksum OK or BAD.</p>
+</section>
+
+<!-- Bike: read once per connection -->
+<section class="tab" id="tabBike">
+  <p class="note" id="bikeSub">Read from the CCU once per connection.</p>
+  <div class="scroll"><table class="grid"><tbody id="bikeBody"><tr><td class="note">No data yet.</td></tr></tbody></table></div>
+</section>
+
+<!-- Map: Leaflet loads the first time this tab opens -->
+<section class="tab" id="tabMap">
+  <div class="mapwrap">
+    <div id="map"></div>
+    <div class="mappanel">
+      <div class="row"><input id="q" placeholder="Search a place" autocomplete="off" enterkeyhint="search" aria-label="Search a place">
+        <button class="btn" id="btnMe" aria-label="Show my location">Me</button></div>
+      <div id="results"></div>
+      <div class="row"><button class="btn" id="btnGps" disabled>Share GPS</button></div>
+      <div id="destBox" hidden>
+        <div class="dest" id="destName"></div>
+        <div class="note" id="destInfo"></div>
+        <div id="routes"></div>
+        <div class="row"><button class="btn pri" id="btnSend" disabled>Send route</button><button class="btn" id="btnSave">Save place</button><button class="btn" id="btnClear">Close</button></div>
       </div>
-      <button id="btnClear" class="cap secondary">Close</button>
-    </div>
-    <button id="btnStop" class="cap danger" hidden>Stop navigation</button>
-    <div class="dim hint">Hold a spot on the map to drive there.</div>
-  </div>
-
-  <!-- ================= Engine tab ================= -->
-  <main class="view for-engine" id="tabEngine">
-    <header class="title"><h1>Engine</h1><span class="demo-tag" id="demoTag" hidden>Demo data</span></header>
-    <div class="links">
-      <button class="linkpill" data-open="pgCluster"><i class="dot" id="dotCluster"></i><span>Cluster</span><b id="pillCluster">Not connected</b></button>
-      <button class="linkpill" data-open="pgCcu"><i class="dot" id="dotCcu"></i><span>Yamaha CCU</span><b id="pillCcu">Off</b></button>
-    </div>
-    <div class="attention" id="attention" role="status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20Z"/><path d="M12 10v4M12 17v.5"/></svg><span id="attentionText">Fault status not read yet</span></div>
-    <div class="segmented" role="tablist">
-      <button role="tab" id="segRide" class="on" aria-selected="true">Ride</button>
-      <button role="tab" id="segFields" aria-selected="false">All fields</button>
-    </div>
-
-    <section id="engRide">
-      <div class="card hero">
-        <div class="lbl">Engine speed <em class="vs" data-k="rpm"></em></div>
-        <div class="big"><span id="vRpm">–</span><small>rpm</small></div>
-        <div class="slim" aria-hidden="true"><i id="barRpm"></i></div>
-        <div class="scale" aria-hidden="true"><span>0</span><span>5.000</span><span>10.000</span></div>
-      </div>
-      <div class="grid2">
-        <div class="card tile"><div class="lbl">Speed <em class="vs" data-k="speed"></em></div><div class="mid"><span id="vSpeed">–</span><small>km/h</small></div></div>
-        <div class="card tile"><div class="lbl">Engine temperature <em class="vs" data-k="eng"></em></div><div class="mid"><span id="vEng">–</span><small>°C</small></div></div>
-        <div class="card tile"><div class="lbl">Battery <em class="vs" data-k="batt"></em></div><div class="mid"><span id="vBatt">–</span><small>V</small></div></div>
-        <div class="card tile"><div class="lbl">Throttle <em class="vs" data-k="thr"></em></div><div class="mid"><span id="vThr">–</span><small>%</small></div>
-          <div class="slim" aria-hidden="true"><i id="barThr"></i></div></div>
-      </div>
-      <div class="card wide">
-        <div><div class="lbl">Odometer</div><div class="mid"><span id="vOdo">–</span><small>km</small></div></div>
-        <div><div class="lbl">Intake pressure</div><div class="mid"><span id="vMap">–</span><small>kPa</small></div></div>
-      </div>
-      <div class="card empty" id="engEmpty">
-        <b>No engine data yet</b>
-        <p id="engEmptyWhy">Connect the cluster. The cluster connects to the Yamaha CCU and passes its data to this phone.</p>
-        <button class="cap secondary" data-open="pgCcu">Set up the Yamaha CCU</button>
-      </div>
-    </section>
-
-    <section id="engFields" hidden>
-      <label class="switchrow"><span>Show fields this bike does not have</span><input type="checkbox" id="showNotFitted" role="switch"></label>
-      <div id="fieldGroups"></div>
-    </section>
-
-    <div class="logbar">
-      <button class="cap" id="btnRecord"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/></svg><span id="recLabel">Record capture</span></button>
-    </div>
-  </main>
-
-  <!-- ================= Bike tab ================= -->
-  <main class="view for-bike" id="tabBike">
-    <header class="title"><div class="brandline">YAMAHA</div><h1 id="bikeTitle">Bike</h1><div class="dim" id="bikeSub">Read from the CCU once per connection.</div></header>
-    <div id="bikeGroups"></div>
-  </main>
-
-  <!-- ================= More tab ================= -->
-  <main class="view for-more" id="tabMore">
-    <header class="title"><h1>More</h1></header>
-    <h2>Devices</h2>
-    <div class="list">
-      <button class="li" data-open="pgCluster"><span>ESP 2.8 cluster</span><b id="moreCluster">Not connected</b></button>
-      <button class="li" data-open="pgCcu"><span>Yamaha CCU</span><b id="moreCcu">Off</b></button>
-    </div>
-    <h2>Recordings</h2>
-    <div class="list">
-      <button class="li" data-open="pgCaptures"><span>Captures</span><b id="moreCaps"></b></button>
-    </div>
-    <h2>Navigation</h2>
-    <div class="list">
-      <button class="li" data-open="pgGoogle"><span>Google maps and route options</span><b id="moreGoogle"></b></button>
-      <button class="li" data-open="pgSaved"><span>Saved places</span><b id="moreSaved"></b></button>
-      <button class="li" data-open="pgAppearance"><span>Map appearance</span><b></b></button>
-      <button class="li" data-open="pgDebug"><span>Route simulation</span><b></b></button>
-    </div>
-    <h2>Support</h2>
-    <div class="list">
-      <button class="li" data-open="pgLog"><span>Log</span><b></b></button>
-    </div>
-    <div class="about">
-      <div class="wordmark">MUSANG <span>GARAGE</span></div>
-      <div class="dim">ESP 2.8 Companion · <span id="ver">Web version 2.8-w0.6.0</span></div>
-      <div class="dim" id="mapAttrib"></div>
-    </div>
-  </main>
-
-  <!-- floating tab bar -->
-  <nav class="tabbar" aria-label="Tabs">
-    <button data-tab="engine" aria-label="Engine"><svg viewBox="0 0 24 24"><path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/><circle cx="12" cy="16" r="1.4"/></svg><span>Engine</span></button>
-    <button data-tab="map" aria-label="Map"><svg viewBox="0 0 24 24"><path d="M12 21s-6-5.6-6-11a6 6 0 0 1 12 0c0 5.4-6 11-6 11Z"/><circle cx="12" cy="10" r="2.2"/></svg><span>Map</span></button>
-    <button data-tab="bike" aria-label="Bike"><svg viewBox="0 0 24 24"><circle cx="6" cy="16" r="3.2"/><circle cx="18" cy="16" r="3.2"/><path d="M6 16h5l3-6h3l1 6M9 10h4"/></svg><span>Bike</span></button>
-    <button data-tab="more" aria-label="More"><svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/></svg><span>More</span></button>
-  </nav>
-  <div class="toast" id="toast" role="status" hidden></div>
-
-  <!-- ================= pushed pages ================= -->
-  <div class="page" id="pgCluster" hidden>
-    <header><button class="round" data-back aria-label="Back to More">‹</button><b>ESP 2.8 cluster</b></header>
-    <div class="card"><div class="kv" id="details"></div></div>
-    <button class="cap js-link">Connect cluster</button>
-    <h2>Cluster</h2>
-    <div class="list">
-      <button class="li" data-open="pgPairing"><span>Registration</span><b id="moreReg"></b></button>
-      <button class="li" data-open="pgFirmware"><span>Firmware update</span><b></b></button>
-    </div>
-    <div class="dim">Data link: Bluetooth (MUTECH-BLE/2) to the cluster.</div>
-  </div>
-
-  <div class="page" id="pgCcu" hidden>
-    <header><button class="round" data-back aria-label="Back">‹</button><b>Yamaha CCU</b></header>
-    <div class="dim">The cluster connects to the bike's Y-Connect unit (CCU), logs in, keeps the link alive and passes every CCU message to this phone. Turn the key ON.</div>
-    <div class="card"><div class="kv" id="ccuKv"></div></div>
-    <label class="switchrow card"><span>Cluster connects to the CCU</span><input type="checkbox" id="ccuLinkOn" role="switch"></label>
-    <h2>Phone ID</h2>
-    <div class="card">
-      <div class="dim">The 32-character ID your CCU already knows (from the Y-Connect pairing). It is sent once to the cluster and stored there. It is never part of the website.</div>
-      <input type="password" id="ccuId" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="32 characters, 0–9 and a–f" aria-label="Phone ID">
-      <div class="row"><button class="cap" id="btnCcuIdSave">Send</button><button class="cap secondary" id="btnCcuIdShow">Show</button></div>
-      <button class="cap danger" id="btnCcuIdErase">Erase from the cluster</button>
-      <div class="dim" id="ccuIdMsg"></div>
-    </div>
-    <h2>Demo</h2>
-    <label class="switchrow card"><span>Demo data (no bike needed)</span><input type="checkbox" id="demoOn" role="switch"></label>
-    <div class="dim">Made-up engine values to try the screens. Marked "Demo data" on Engine and Bike.</div>
-  </div>
-
-  <div class="page" id="pgCaptures" hidden>
-    <header><button class="round" data-back aria-label="Back to More">‹</button><b>Captures</b></header>
-    <div class="dim">Each recording is kept on this phone. Download gives the raw log, one CCU message per line: time, then the message in hexadecimal (the format the Mac decoder reads).</div>
-    <div id="capList"></div>
-  </div>
-
-  <div class="page" id="pgPairing" hidden>
-    <header><button class="round" data-back aria-label="Back">‹</button><b>Registration</b></header>
-    <div class="card">
-      <div id="pairState" class="banner">…</div>
-      <ol class="dim">
-        <li>Turn the cluster on (firmware 0.1.4 or later: no BOOT, no pairing code).</li>
-        <li>Tap Register this iPhone and choose "ESP 2.8 Cluster".</li>
-      </ol>
-      <button class="cap" id="btnRegister">Register this iPhone</button>
-      <button class="cap danger" id="btnForget">Erase pairing data on this phone</button>
-      <div class="dim">After erasing, also remove "ESP 2.8 Cluster" in iPhone Settings → Bluetooth if it is listed there.</div>
+      <button class="btn bad" id="btnStop" hidden>Stop navigation</button>
+      <p class="note">Hold (or right-click) a spot on the map to drive there.</p>
+      <p class="note" id="mapAttrib"></p>
     </div>
   </div>
+</section>
 
-  <div class="page" id="pgFirmware" hidden>
-    <header><button class="round" data-back aria-label="Back">‹</button><b>Firmware update</b></header>
-    <div class="card"><div id="fwInstalled" class="dim">Cluster: not connected</div></div>
-    <div class="dim">Choose the image file on this iPhone (Files): speedo.bin for the app, updater.bin for the updater. The cluster only accepts images signed with its own key.</div>
-    <input type="file" id="fwFile" accept=".bin,application/octet-stream">
-    <div class="card" id="fwInfo" hidden><div class="kv" id="fwKv"></div><div id="fwVerdict" class="banner"></div></div>
-    <button class="cap" id="btnFwInstall" disabled>Install on the cluster</button>
-    <div class="card" id="fwProgress" hidden>
-      <div id="fwStep">…</div>
-      <div class="slim tall"><i id="fwBar"></i></div>
-      <button id="btnFwCancel" class="cap danger">Cancel update</button>
+<!-- Setup: every setting on one page -->
+<section class="tab" id="tabSetup">
+  <div class="cols">
+    <div class="box" id="pgCluster">
+      <h3>Cluster</h3>
+      <div class="kv" id="details"></div>
+      <button class="btn js-link">Connect cluster</button>
     </div>
-    <div class="dim">Keep the bike stopped, this page open and the screen on until it finishes. The cluster checks the image's signature and SHA-256 before switching; if anything fails it keeps the current firmware.</div>
-  </div>
-
-  <div class="page" id="pgGoogle" hidden>
-    <header><button class="round" data-back aria-label="Back to More">‹</button><b>Google maps and route options</b></header>
-    <div class="card">
-      <div id="googleState" class="banner"></div>
+    <div class="box" id="pgCcu">
+      <h3>Yamaha CCU (through the cluster)</h3>
+      <div class="kv" id="ccuKv"></div>
+      <label class="inline"><input type="checkbox" id="ccuLinkOn"> Cluster connects to the CCU</label>
+      <p class="note">Phone ID: the 32-character ID the CCU already knows. Sent once to the cluster and stored there; never shown again, never in the website.</p>
+      <div class="row"><input type="password" id="ccuId" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="32 characters, 0-9 a-f" aria-label="Phone ID">
+        <button class="btn" id="btnCcuIdShow">Show</button></div>
+      <div class="row"><button class="btn pri" id="btnCcuIdSave">Send to cluster</button><button class="btn bad" id="btnCcuIdErase">Erase from cluster</button></div>
+      <p class="note" id="ccuIdMsg"></p>
+      <label class="inline"><input type="checkbox" id="demoOn"> Demo data (made-up values, no bike needed)</label>
+    </div>
+    <div class="box" id="pgCaptures">
+      <h3>Captures (on this device)</h3>
+      <p class="note">One CCU message per line: time in seconds, then the message in hex. Same format as CCU Live and decode_log.py.</p>
+      <div id="capList"></div>
+    </div>
+    <div class="box" id="pgPairing">
+      <h3>Registration</h3>
+      <div id="pairState" class="note">…</div>
+      <p class="note">Firmware 0.1.4 or later: no BOOT, no pairing code. Tap Register and choose "ESP 2.8 Cluster".</p>
+      <div class="row"><button class="btn" id="btnRegister">Register this device</button><button class="btn bad" id="btnForget">Erase pairing data</button></div>
+    </div>
+    <div class="box" id="pgFirmware">
+      <h3>Firmware update</h3>
+      <div class="note" id="fwInstalled">Cluster: not connected</div>
+      <p class="note">Choose speedo.bin (app) or updater.bin. The cluster only accepts images signed with its own key and keeps the current firmware if anything fails.</p>
+      <input type="file" id="fwFile" accept=".bin,application/octet-stream">
+      <div id="fwInfo" hidden><div class="kv" id="fwKv"></div><div id="fwVerdict" class="status"></div></div>
+      <button class="btn pri" id="btnFwInstall" disabled>Install on the cluster</button>
+      <div id="fwProgress" hidden><div id="fwStep">…</div><div class="bar"><i id="fwBar"></i></div><button id="btnFwCancel" class="btn bad">Cancel update</button></div>
+    </div>
+    <div class="box" id="pgGoogle">
+      <h3>Google maps and routes (optional)</h3>
+      <div id="googleState" class="note"></div>
       <input id="gkey" placeholder="Google API key (optional)" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Google API key">
-      <div class="dim">Stored on this iPhone only, never in the app's code. Leave empty for free OpenStreetMap. The key needs Maps JavaScript API, Places API (New) and Routes API enabled.</div>
-      <button class="cap secondary" id="btnReload">Reload to apply</button>
-      <button class="cap secondary" id="btnTestKey">Test key (writes the result to Log)</button>
-    </div>
-    <h2>Route options (Google)</h2>
-    <div class="card">
+      <p class="note">Stored on this device only. Empty = free OpenStreetMap. Each request type stops at 99% of its free monthly amount.</p>
+      <div class="row"><button class="btn" id="btnReload">Reload to apply</button><button class="btn" id="btnTestKey">Test key</button></div>
       <select id="optMode" aria-label="Vehicle"><option value="TWO_WHEELER">Motorbike</option><option value="DRIVE">Car</option></select>
-      <label class="switchrow"><span>Avoid tolls</span><input type="checkbox" id="optTolls" role="switch"></label>
-      <label class="switchrow"><span>Avoid motorways</span><input type="checkbox" id="optHighways" role="switch"></label>
-      <label class="switchrow"><span>Avoid ferries</span><input type="checkbox" id="optFerries" role="switch"></label>
-    </div>
-    <h2>This month on this phone</h2>
-    <div class="card">
+      <label class="inline"><input type="checkbox" id="optTolls"> Avoid tolls</label>
+      <label class="inline"><input type="checkbox" id="optHighways"> Avoid motorways</label>
+      <label class="inline"><input type="checkbox" id="optFerries"> Avoid ferries</label>
       <pre id="usage"></pre>
-      <div class="dim">Counted on this phone only, not Google's bill. Each kind of request stops at 99% of its free amount and switches to OpenStreetMap.</div>
+    </div>
+    <div class="box" id="pgSaved">
+      <h3>Saved places</h3>
+      <div id="savedList"></div>
+      <p class="note" id="savedEmpty">None yet. Pick a destination on Map, then Save place.</p>
+    </div>
+    <div class="box" id="pgAppearance">
+      <h3>Map appearance (sent to the cluster)</h3>
+      <div class="preview" id="preview"><i></i></div>
+      <button class="btn" id="btnPreviewMode">Previewing day. Tap for night</button>
+      <label class="slider"><span id="lblRoad"></span><input type="range" id="slRoad" min="5" max="100"></label>
+      <label class="slider"><span id="lblTerrain"></span><input type="range" id="slTerrain" min="5" max="100"></label>
+      <div class="row"><button class="btn" id="btnResetMode">Reset this mode</button><button class="btn" id="btnClusterTheme">Cluster theme: Auto</button></div>
+    </div>
+    <div class="box" id="pgDebug">
+      <h3>Route simulation</h3>
+      <p class="note" id="simHint">Choose a destination and route on Map first.</p>
+      <label class="slider"><span id="lblSim"></span><input type="range" id="slSim" min="5" max="300"></label>
+      <div class="row"><button class="btn" id="btnSimulate">Simulate selected route</button><button class="btn" id="btnLiveGps">Use phone GPS</button></div>
     </div>
   </div>
+  <p class="note"><span id="ver">Web version 2.8-w0.6.0</span></p>
+</section>
 
-  <div class="page" id="pgSaved" hidden>
-    <header><button class="round" data-back aria-label="Back to More">‹</button><b>Saved places</b></header>
-    <div id="savedList"></div>
-    <div class="dim" id="savedEmpty">No saved places yet. Pick a destination on the Map, then tap Save place.</div>
-  </div>
+<section class="tab" id="tabLog">
+  <pre id="log" class="mono"></pre>
+</section>
+</main>
 
-  <div class="page" id="pgAppearance" hidden>
-    <header><button class="round" data-back aria-label="Back to More">‹</button><b>Map appearance</b></header>
-    <div class="dim">Tune day and night separately. Changes are saved and sent to the cluster. The cluster's offline map keeps its own colours: road and terrain brightness are not applied there yet.</div>
-    <div class="preview" id="preview"><i></i></div>
-    <button class="cap secondary" id="btnPreviewMode">Previewing day. Tap for night</button>
-    <label class="slider"><span id="lblRoad"></span><input type="range" id="slRoad" min="5" max="100"></label>
-    <label class="slider"><span id="lblTerrain"></span><input type="range" id="slTerrain" min="5" max="100"></label>
-    <button class="cap secondary" id="btnResetMode">Reset this mode</button>
-    <button class="cap secondary" id="btnClusterTheme">Cluster theme: Auto</button>
-  </div>
-
-  <div class="page" id="pgDebug" hidden>
-    <header><button class="round" data-back aria-label="Back to More">‹</button><b>Route simulation</b></header>
-    <div class="dim">Test movement on the cluster. Simulation is not live GPS.</div>
-    <button class="cap" id="btnSimulate">Simulate selected route</button>
-    <div class="dim" id="simHint">Choose a destination and route on the Map first.</div>
-    <label class="slider"><span id="lblSim"></span><input type="range" id="slSim" min="5" max="300"></label>
-    <button class="cap secondary" id="btnLiveGps">Use phone GPS · stop simulation</button>
-  </div>
-
-  <div class="page" id="pgLog" hidden>
-    <header><button class="round" data-back aria-label="Back to More">‹</button><b>Log</b></header>
-    <pre id="log"></pre>
-  </div>
-
-  <div class="modal" id="modal" hidden><div class="card" id="modalBody"></div></div>
-
-  <script type="module" src="app.js?v=2.8-w0.6.0"></script>
+<div class="modal" id="modal" hidden><div class="box" id="modalBody"></div></div>
+<script type="module" src="app.js?v=2.8-w0.6.0"></script>
 </body>
 </html>

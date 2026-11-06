@@ -22,13 +22,7 @@ function log(msg) {
   const t = new Date().toTimeString().slice(0, 8);
   $('log').textContent = `${t} ${msg}\n` + $('log').textContent.slice(0, 30000);
 }
-let toastT = null;
-function status(text, cls = '') {
-  const s = $('status'); s.textContent = text; s.className = 'banner ' + cls;
-  if (document.body.dataset.tab === 'map' || document.body.classList.contains('paged')) return;
-  const t = $('toast'); t.textContent = text; t.className = 'toast ' + cls; t.hidden = false;
-  clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, cls === 'bad' ? 8000 : 4000);
-}
+function status(text, cls = '') { const s = $('status'); s.textContent = text; s.className = 'status ' + cls; }
 
 // ---------- IndexedDB: the phone key (non-extractable) and the cluster's key ----------
 const db = new Promise((res, rej) => {
@@ -331,6 +325,7 @@ async function planRoutes(from, to, alternatives = true) {
 }
 
 // ---------- map: one interface, Google Maps or Leaflet + OpenStreetMap ----------
+function loadScript(src) { return new Promise((res, rej) => { const e = document.createElement('script'); e.src = src; e.onload = res; e.onerror = () => rej(new Error('could not load ' + src)); document.head.appendChild(e); }); }
 let M = null;
 let followed = false;
 const sheetPad = () => document.querySelector('.sheet').offsetHeight + 20;
@@ -491,12 +486,19 @@ async function googleMap() {
 let googleTried = false;
 let googleFailed = '';
 // swap whatever map is there for OpenStreetMap (Google leaves its own styles on #map: start clean)
-function useOsm(reason) {
+async function leafletReady() {
+  if (window.L) return;
+  const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'leaflet/leaflet.css'; document.head.appendChild(css);
+  await loadScript('leaflet/leaflet.js');
+}
+async function useOsm(reason) {
   if (M && M.kind === 'osm') return;
   if (reason) { log('Google map failed: ' + reason); status(`Google map failed: ${reason}. Using OpenStreetMap (see Log).`, 'warn'); }
   const old = $('map'), fresh = old.cloneNode(false);
   fresh.removeAttribute('style');
   old.replaceWith(fresh);
+  M = null;
+  await leafletReady();
   M = leafletMap();
   log('Map: OpenStreetMap');
   wireMap();
@@ -510,7 +512,11 @@ function wireMap() {
   $('mapAttrib').textContent = M.kind === 'google' ? 'Map, search and routes: Google. Live traffic on motorbike and car routes.'
     : 'Map, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.';
 }
+let mapStarted = false;
 async function startMap() {
+  if (mapStarted) return;
+  mapStarted = true;
+  if (!useGoogle('map', true)) await leafletReady();
   if (useGoogle('map')) {
     googleTried = true;
     log('Google map: loading for ' + location.origin);
@@ -519,7 +525,7 @@ async function startMap() {
     catch (e) { useOsm(googleFailed || e.message); return; }
     if (googleFailed) { useOsm(googleFailed); return; }
   }
-  if (!M) { M = leafletMap(); log('Map: OpenStreetMap'); }
+  if (!M) { await leafletReady(); M = leafletMap(); log('Map: OpenStreetMap'); }
   wireMap();
 }
 function drawMe() {
@@ -655,7 +661,7 @@ async function setDestination(d) {
     $('destInfo').textContent = routeProvider === 'google' ? `Google · ${o.mode === 'DRIVE' ? 'car' : 'motorbike'} · live traffic${o.tolls ? ' · no tolls' : ''}`
       : (nav.choices.every((c) => c.toll) ? 'Every route found uses a toll road' : 'No live traffic: times assume empty roads');
     renderChoices();
-    M.fit(nav.choices[0].coords);
+    if (M) M.fit(nav.choices[0].coords);
   } catch (e) { $('destInfo').textContent = 'Route failed: ' + e.message; }
   render();
 }
@@ -722,10 +728,10 @@ function renderSaved() {
   $('savedEmpty').hidden = s.length > 0;
   s.forEach((p, i) => {
     const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = '<b></b><div class="dim"></div><div class="row"><button>Drive here</button><button class="secondary">Rename</button><button class="danger">Delete</button></div>';
+    card.className = 'saveditem';
+    card.innerHTML = '<b></b><div class="note"></div><div class="row"><button class="btn">Drive here</button><button class="btn">Rename</button><button class="btn bad">Delete</button></div>';
     card.querySelector('b').textContent = p.name;
-    card.querySelector('.dim').textContent = `${p.latitude.toFixed(5)}, ${p.longitude.toFixed(5)}`;
+    card.querySelector('.note').textContent = `${p.latitude.toFixed(5)}, ${p.longitude.toFixed(5)}`;
     const [go, ren, del] = card.querySelectorAll('button');
     go.onclick = () => { closePages(); showTab('map'); setDestination({ name: p.name, lat: p.latitude, lon: p.longitude }); };
     ren.onclick = () => askName('Rename place', p.name, (n) => { const a = saved(); a[i].name = n; store.set('saved', a); renderSaved(); });
@@ -893,12 +899,15 @@ function checkUpdated() {
   else status(`The cluster runs ${v}`, 'warn');
 }
 
-// ---------- pages, dialogs ----------
-const stack = [];
-function openPage(id) { $(id).hidden = false; stack.push(id); document.body.classList.add('paged'); if (id === 'pgSaved') renderSaved(); if (id === 'pgCluster') renderDetails(); if (id === 'pgCcu') renderCcuPage(); if (id === 'pgCaptures') renderCaptures(); if (id === 'pgFirmware') renderFirmware(); if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance(); render(); }
-function closePages() { while (stack.length) $(stack.pop()).hidden = true; document.body.classList.remove('paged'); }
-document.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => { const id = stack.pop(); if (id) $(id).hidden = true; if (!stack.length) document.body.classList.remove('paged'); renderMore(); }));
-document.querySelectorAll('[data-open]').forEach((b) => (b.onclick = () => openPage(b.dataset.open)));
+// ---------- Setup boxes (were pushed pages), dialogs ----------
+function openPage(id) {
+  showTab('setup');
+  if (id === 'pgSaved') renderSaved(); if (id === 'pgCluster') renderDetails(); if (id === 'pgCcu') renderCcuPage(); if (id === 'pgCaptures') renderCaptures();
+  if (id === 'pgFirmware') renderFirmware(); if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance();
+  const el = $(id); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' });
+  render();
+}
+function closePages() {}
 function modal(build) {
   const body = $('modalBody');
   body.innerHTML = '';
@@ -907,7 +916,7 @@ function modal(build) {
 }
 function confirmBox(text, okLabel, ok) {
   modal((b, close) => {
-    b.innerHTML = '<div style="font-size:17px"></div><button></button><button class="secondary">Cancel</button>';
+    b.innerHTML = '<div></div><button class="btn pri"></button> <button class="btn">Cancel</button>';
     b.firstChild.textContent = text;
     const [y, n] = b.querySelectorAll('button');
     y.textContent = okLabel; y.onclick = () => { close(); ok(); };
@@ -916,11 +925,11 @@ function confirmBox(text, okLabel, ok) {
 }
 function askName(title, value, ok) {
   modal((b, close) => {
-    b.innerHTML = '<b></b><input maxlength="80"><div class="dim"></div><button>Save</button><button class="secondary">Cancel</button>';
+    b.innerHTML = '<b></b><input maxlength="80"><div class="note"></div><button class="btn pri">Save</button> <button class="btn">Cancel</button>';
     b.querySelector('b').textContent = title;
     const inp = b.querySelector('input'); inp.value = value;
     const [y, n] = b.querySelectorAll('button');
-    y.onclick = () => { const v = inp.value.trim(); if (v.length < 1 || v.length > 80) { b.querySelector('.dim').textContent = 'Use a name between 1 and 80 characters.'; return; } close(); ok(v); };
+    y.onclick = () => { const v = inp.value.trim(); if (v.length < 1 || v.length > 80) { b.querySelector('.note').textContent = 'Use a name between 1 and 80 characters.'; return; } close(); ok(v); };
     n.onclick = close;
   });
 }
@@ -945,37 +954,41 @@ async function render() {
   const reg = !!(await kv('bikePub'));
   const on = !!(link.dev && link.dev.gatt.connected);
   $('btnLink').textContent = on ? 'Disconnect cluster' : (reg ? 'Connect cluster' : 'Register this iPhone');
-  $('btnLink').className = 'cap' + (on && link.authed ? ' on' : '');
+  $('btnLink').className = 'btn js-link' + (on && link.authed ? ' on' : '');
   $('btnGps').textContent = gps.sharing ? 'GPS sharing on' : 'Share GPS';
-  $('btnGps').className = 'cap ' + (gps.sharing ? 'on' : 'secondary');
+  $('btnGps').className = 'btn' + (gps.sharing ? ' on' : '');
   $('btnGps').disabled = !linked();
   $('btnSend').disabled = !linked() || !nav.choices.length;
   $('btnStop').hidden = !(linked() && nav.line);
   $('btnSimulate').disabled = !nav.choices.length || !linked();
   $('simHint').hidden = nav.choices.length > 0;
   $('pairState').textContent = reg ? 'This phone is registered with a cluster.' : 'Not registered yet.';
-  if (stack.includes('pgCluster')) renderDetails();
+  if (document.body.dataset.tab === 'setup') renderDetails();
   const label = $('btnLink').textContent;
-  document.querySelectorAll('.js-link').forEach((b) => { b.textContent = label; b.className = 'cap js-link' + (on && link.authed ? ' on' : ''); });
-  renderCcuLinks(); renderMore();
+  document.querySelectorAll('.js-link').forEach((b) => { b.textContent = label; b.className = 'btn js-link' + (on && link.authed ? ' on' : ''); });
+  renderChips();
 }
 
 
 // ---------- Yamaha CCU through the cluster (ccu.js: decoder and relay contract) ----------
 const ccu = { fields: new CcuFields(), state: null, stateAt: 0, relayOn: null, demo: false, demoT: null, demoStart: 0,
-  frames: 0, lastFrameAt: 0, rateFrames: [], rec: null };
+  frames: 0, lastFrameAt: 0, rateFrames: [], rec: null, raw: [], rawPaused: false, rawDirty: false };
 const STATUS_CLASS = { [ST_V]: 'verified', [ST_P]: 'plausible', [ST_U]: 'unknown', [ST_X]: 'notverified', [ST_N]: 'notfitted' };
-const nf = (v, d = 0) => (typeof v === 'number' ? v.toLocaleString('id-ID', { minimumFractionDigits: d, maximumFractionDigits: d }) : (v ?? '–'));
+const nf = (v, d = 0) => (typeof v === 'number' ? v.toLocaleString('id-ID', { minimumFractionDigits: d, maximumFractionDigits: d }) : (v ?? '-'));
+const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function onCcuFrame(h) {
   let b;
   try { b = fromHex(h); } catch (_) { return; }
-  ccu.fields.decode(b);
+  const ok = ccu.fields.decode(b);
   const now = Date.now();
   ccu.frames++; ccu.lastFrameAt = now; ccu.rateFrames.push(now);
+  if (ccu.rateFrames.length > 200) ccu.rateFrames.splice(0, 100);
   if (ccu.rec) { ccu.rec.buf.push(captureLine(now, h.toLowerCase())); ccu.rec.frames++; }
+  if (!ccu.rawPaused) { ccu.raw.unshift({ t: now, h: h.toLowerCase(), ok, id: b[0] }); if (ccu.raw.length > 200) ccu.raw.length = 200; ccu.rawDirty = true; }
 }
-// the relay runs while Engine or Bike is on screen, or while recording
-function wantRelay() { return ccu.rec !== null || ['engine', 'bike'].includes(document.body.dataset.tab); }
+// the relay runs while a CCU tab is on screen, or while recording
+const CCU_TABS = ['live', 'fields', 'raw', 'bike'];
+function wantRelay() { return ccu.rec !== null || CCU_TABS.includes(document.body.dataset.tab); }
 function syncRelay() {
   if (!linked() || ccu.demo) return;
   const want = wantRelay();
@@ -984,104 +997,119 @@ function syncRelay() {
   sendLine(ccuRelayLine(want), true).catch(() => { ccu.relayOn = null; });
 }
 function ccuStateName() {
-  if (ccu.demo) return 'Demo data';
-  if (!linked()) return 'Off';
-  if (!ccu.state) return 'Waiting for the cluster';
-  return CCU_STATES[ccu.state.state] || ccu.state.state;
+  if (ccu.demo) return 'demo';
+  if (!linked()) return 'off';
+  if (!ccu.state) return 'no reply (firmware 0.1.5 needed)';
+  return (CCU_STATES[ccu.state.state] || ccu.state.state).toLowerCase();
 }
-function rate() {
-  const now = Date.now();
-  ccu.rateFrames = ccu.rateFrames.filter((t) => now - t < 5000);
-  return ccu.rateFrames.length / 5;
-}
-function renderCcuLinks() {
+function rate() { const now = Date.now(); let n = 0; for (const t of ccu.rateFrames) if (now - t < 5000) n++; return n / 5; }
+function setText(id, v) { const e = $(id); if (e.textContent !== v) e.textContent = v; }
+function renderChips() {
   const on = linked();
-  $('pillCluster').textContent = on ? 'Linked' : (link.dev && link.dev.gatt.connected ? 'Connecting' : 'Not connected');
-  $('dotCluster').className = 'dot ' + (on ? 'ok' : '');
+  setText('pillCluster', on ? 'linked' : (link.dev && link.dev.gatt.connected ? 'connecting' : 'off'));
+  $('chipCluster').className = 'chip ' + (on ? 'ok' : '');
   const st = ccu.demo ? 'streaming' : (on && ccu.state ? ccu.state.state : 'off');
   const live = Date.now() - ccu.lastFrameAt < 3000;
-  $('pillCcu').textContent = ccu.demo ? 'Demo data' : (st === 'streaming' && live ? 'Streaming' : ccuStateName());
-  $('dotCcu').className = 'dot ' + (st === 'streaming' && live ? 'ok' : st === 'rejected' ? 'bad' : ['scanning', 'connecting', 'reconnecting'].includes(st) ? 'warn' : '');
+  setText('pillCcu', ccuStateName());
+  $('chipCcu').className = 'chip ' + (st === 'streaming' && live ? 'ok' : st === 'rejected' ? 'bad' : ['scanning', 'connecting', 'reconnecting'].includes(st) ? 'warn' : '');
+  setText('chipRate', `${rate().toFixed(1)}/s`);
   $('demoTag').hidden = !ccu.demo;
-}
-function renderMore() {
-  $('moreCluster').textContent = linked() ? 'Linked' : 'Not connected';
-  $('moreCcu').textContent = ccuStateName();
-  $('moreSaved').textContent = saved().length || '';
-  $('moreGoogle').textContent = gkey() ? 'On' : 'Off';
-}
-function setTile(id, v, d) { $(id).textContent = v === undefined ? '–' : nf(v, d); }
-function renderEngine() {
-  const f = ccu.fields, g = (k) => f.get(k);
-  const has = g('rpm') !== undefined;
-  setTile('vRpm', g('rpm'), 0); setTile('vSpeed', g('speed'), 0); setTile('vEng', g('eng'), 0); setTile('vBatt', g('batt'), 1);
-  setTile('vThr', g('thr'), 0); setTile('vOdo', g('L0048'), 1); setTile('vMap', g('map'), 0);
-  $('barRpm').style.width = has ? Math.min(100, g('rpm') / 100) + '%' : '0';
-  $('barThr').style.width = g('thr') !== undefined ? Math.min(100, g('thr')) + '%' : '0';
-  document.querySelectorAll('.vs[data-k]').forEach((e) => {
-    const r = f.rows.get(e.dataset.k); const st = r ? r.status : '';
-    e.textContent = st && st !== ST_V ? st : ''; e.className = 'vs ' + (STATUS_CLASS[st] || '');
-  });
-  const w = f.warning();
-  $('attention').className = 'attention ' + (w.level === 'unknown' ? '' : w.level);
-  $('attentionText').textContent = w.text;
-  $('engEmpty').hidden = has;
-  $('engEmptyWhy').textContent = !linked() ? 'Connect the cluster. The cluster connects to the Yamaha CCU and passes its data to this phone.'
-    : !ccu.state ? 'The cluster has not reported the CCU yet. Firmware 0.1.5 or later is needed for the CCU link.'
-    : ccu.state.state === 'noId' ? 'Send the phone ID to the cluster first.'
-    : ccu.state.state === 'off' ? 'Turn on "Cluster connects to the CCU".'
-    : ccu.state.state === 'rejected' ? 'The CCU rejected the phone ID. Check it in Yamaha CCU settings.'
-    : 'Turn the key ON. The cluster is ' + ccuStateName().toLowerCase() + '.';
-  if (!$('engFields').hidden) renderFieldRows($('fieldGroups'), f.groups(!$('showNotFitted').checked));
-  $('recLabel').textContent = ccu.rec ? `Stop recording · ${clock(Date.now() - ccu.rec.started)} · ${ccu.rec.frames} messages` : 'Record capture';
-  $('btnRecord').className = 'cap' + (ccu.rec ? ' rec' : '');
+  setText('recLabel', ccu.rec ? `Stop ${clock(Date.now() - ccu.rec.started)} · ${ccu.rec.frames}` : 'Record');
+  $('btnRecord').className = 'btn' + (ccu.rec ? ' rec' : '');
   $('btnRecord').disabled = !ccu.rec && !ccu.demo && !linked();
 }
 const clock = (ms) => { const s = Math.floor(ms / 1000); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
-function fmtVal(r) {
-  if (typeof r.value === 'number') return nf(r.value, Number.isInteger(r.value) ? 0 : (Math.abs(r.value) < 100 ? 2 : 1));
-  return r.value;
+function renderLive() {
+  const f = ccu.fields, g = (k) => f.get(k);
+  const has = g('rpm') !== undefined;
+  const t = (id, v, d) => setText(id, v === undefined ? '-' : nf(v, d));
+  t('vRpm', g('rpm'), 0); t('vSpeed', g('speed'), 0); t('vEng', g('eng'), 0); t('vBatt', g('batt'), 1);
+  t('vThr', g('thr'), 0); t('vOdo', g('L0048'), 1); t('vMap', g('map'), 0); t('vIgn', g('ign'), 0);
+  document.querySelectorAll('.vs[data-k]').forEach((e) => {
+    const r = f.rows.get(e.dataset.k); const st = r ? r.status : '';
+    const txt = st && st !== ST_V ? st : '';
+    if (e.textContent !== txt) { e.textContent = txt; e.className = 'vs ' + (STATUS_CLASS[st] || ''); }
+  });
+  const w = f.warning();
+  $('attention').className = 'fault ' + (w.level === 'unknown' ? '' : w.level);
+  setText('attentionText', w.text);
+  $('engEmpty').hidden = has;
+  setText('engEmptyWhy', !linked() && !ccu.demo ? 'Connect the cluster. The cluster connects to the Yamaha CCU and passes its data here. Or turn on Demo data in Setup.'
+    : !ccu.state && !ccu.demo ? 'The cluster has not reported the CCU. Firmware 0.1.5 or later is needed for the CCU link.'
+    : ccu.state && ccu.state.state === 'noId' ? 'Send the phone ID to the cluster (Setup).'
+    : ccu.state && ccu.state.state === 'off' ? 'Turn on "Cluster connects to the CCU" (Setup).'
+    : ccu.state && ccu.state.state === 'rejected' ? 'The CCU rejected the phone ID.'
+    : 'Turn the key ON. CCU: ' + ccuStateName() + '.');
 }
-function renderFieldRows(host, groups, opts = {}) {
-  const html = [];
-  for (const [name, rows] of groups) {
-    html.push(`<h2>${esc(opts.rename?.[name] || name)}</h2><div class="list">`);
-    for (const r of rows) {
-      const unit = ['raw', 'hex', 'text', 'count', ''].includes(r.unit) ? '' : r.unit;
-      const range = typeof r.value === 'number' && r.min !== r.max ? `${nf(r.min, Number.isInteger(r.min) ? 0 : 1)} – ${nf(r.max, Number.isInteger(r.max) ? 0 : 1)}` : '';
-      html.push(`<div class="frow"><div class="k">${esc(r.label)}</div><div class="v">${esc(fmtVal(r))}${unit ? `<small>${esc(unit)}</small>` : ''}</div>
-        <div class="m"><span class="vs ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>${r.unit === 'raw' || r.unit === 'hex' ? `<span>${r.unit === 'raw' ? 'raw value' : 'hexadecimal'}</span>` : ''}${range ? `<span>${range}</span>` : ''}</div></div>`);
+const fmtVal = (r) => (typeof r.value === 'number' ? nf(r.value, Number.isInteger(r.value) ? 0 : (Math.abs(r.value) < 100 ? 2 : 1)) : String(r.value));
+const numFmt = (x) => (x === null || x === undefined ? '' : nf(x, Number.isInteger(x) ? 0 : 1));
+// Fields table: rows are created once per field and only their changed cells are written
+const fieldRows = new Map();
+let fieldsLayout = '';
+function renderFields() {
+  const showAll = $('showNotFitted').checked;
+  const groups = ccu.fields.groups(!showAll);
+  const layout = showAll + '|' + groups.map(([g, rows]) => g + ':' + rows.length).join(',');
+  const body = $('fieldBody');
+  if (layout !== fieldsLayout) {
+    fieldsLayout = layout; fieldRows.clear(); body.textContent = '';
+    if (!groups.length) { body.innerHTML = '<tr><td colspan="7" class="note">No data yet.</td></tr>'; return; }
+    for (const [g, rows] of groups) {
+      const gr = document.createElement('tr'); gr.className = 'grp'; gr.innerHTML = `<td colspan="7">${esc(g)}</td>`; body.appendChild(gr);
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${esc(r.label)}</td><td class="r v"></td><td>${esc(r.unit)}</td><td class="r opt"></td><td class="r opt"></td><td class="raw opt"></td><td><span class="vs ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span></td>`;
+        body.appendChild(tr); fieldRows.set(r, tr.children);
+      }
     }
-    html.push('</div>');
   }
-  host.innerHTML = html.join('') || '<div class="card empty"><b>No data yet</b><p>Fields appear as the CCU sends them.</p></div>';
+  for (const [r, c] of fieldRows) {
+    const v = fmtVal(r), mn = numFmt(r.min), mx = numFmt(r.max), raw = String(r.raw ?? '');
+    if (c[1].textContent !== v) c[1].textContent = v;
+    if (c[3].textContent !== mn) c[3].textContent = mn;
+    if (c[4].textContent !== mx) c[4].textContent = mx;
+    if (c[5].textContent !== raw) c[5].textContent = raw;
+  }
 }
-const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let rawDrawn = 0;
+function renderRaw(force = false) {
+  if (!ccu.rawDirty) return;
+  if (!force && Date.now() - rawDrawn < 500) return;   // twice a second is enough to read
+  rawDrawn = Date.now(); ccu.rawDirty = false;
+  const hide55 = $('rawLiveOnly').checked;
+  const rows = [];
+  for (const m of ccu.raw) {
+    if (rows.length >= 100) break;
+    if (hide55 && m.id === 0x55) continue;
+    const d = new Date(m.t);
+    rows.push(`<tr><td>${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, '0')}</td><td>0x${m.id.toString(16).padStart(2, '0')}</td><td class="r">${m.h.length / 2}</td><td class="${m.ok ? '' : 'badsum'}">${m.ok ? 'OK' : 'BAD'}</td><td class="hex">${m.h}</td></tr>`);
+  }
+  $('rawBody').innerHTML = rows.join('') || '<tr><td colspan="5" class="note">No messages yet.</td></tr>';
+}
 const BIKE_GROUPS = [
   ['Identity', ['Lf190', 'Lf197', 'Lf194']],
   ['Lifetime', ['L0048', 'Lf702', 'Lf1a2', 'Lf1a1', 'Lf701', 'Lff67']],
   ['Faults', ['fcnt', 'dtc', 'L023a', 'Lf421', 'Lf44d']],
 ];
+let bikeSig = '';
 function renderBike() {
-  const f = ccu.fields, groups = [];
-  const used = new Set();
-  for (const [name, keys] of BIKE_GROUPS) {
-    const rows = keys.map((k) => { used.add(k); return f.rows.get(k); }).filter(Boolean);
-    if (rows.length) groups.push([name, rows]);
-  }
-  const stats = [...f.rows.values()].filter((r) => r.group === 'Statistics (raw)');
-  if (stats.length) groups.push(['Statistics (raw)', stats]);
-  const model = f.get('Lf197');
-  $('bikeTitle').textContent = model ? `Model ${model}` : 'Bike';
-  $('bikeSub').textContent = ccu.demo ? 'Demo data: made-up values.' : 'Read from the CCU once per connection.';
-  renderFieldRows($('bikeGroups'), groups);
+  const f = ccu.fields, html = [];
+  const sec = (name, rows) => { if (!rows.length) return; html.push(`<tr class="grp"><td colspan="4">${esc(name)}</td></tr>`);
+    for (const r of rows) html.push(`<tr><td>${esc(r.label)}</td><td class="r v">${esc(fmtVal(r))}</td><td>${esc(r.unit)}</td><td><span class="vs ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span></td></tr>`); };
+  for (const [name, keys] of BIKE_GROUPS) sec(name, keys.map((k) => f.rows.get(k)).filter(Boolean));
+  sec('Statistics (raw)', [...f.rows.values()].filter((r) => r.group === 'Statistics (raw)'));
+  const out = html.join('') || '<tr><td class="note">No data yet.</td></tr>';
+  if (out !== bikeSig) { bikeSig = out; $('bikeBody').innerHTML = out; }
+  setText('bikeSub', ccu.demo ? 'Demo data: made-up values.' : 'Read from the CCU once per connection.');
 }
 function renderCcuPage() {
   const s = ccu.state || {};
-  const rows = [['State', ccuStateName()], ['CCU', s.name || '–'], ['Signal', s.rssi ? `${s.rssi} dBm` : '–'],
-    ['Messages', nf(ccu.demo ? ccu.frames : (s.frames ?? ccu.frames))], ['Per second', nf(rate(), 1)], ['Heartbeats', nf(s.heartbeats ?? 0)], ['Reconnects', nf(s.reconnects ?? 0)],
-    ['Phone ID on the cluster', s.idSet === undefined ? '–' : (s.idSet ? 'Set' : 'Not set')]];
-  $('ccuKv').innerHTML = rows.map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
+  const rows = [['State', ccuStateName()], ['CCU', s.name || '-'], ['Signal', s.rssi ? `${s.rssi} dBm` : '-'],
+    ['Messages (cluster)', nf(s.frames ?? 0)], ['Messages (here)', nf(ccu.frames)], ['Per second (here)', rate().toFixed(1)],
+    ['Heartbeats', nf(s.heartbeats ?? 0)], ['Reconnects', nf(s.reconnects ?? 0)],
+    ['Phone ID on cluster', s.idSet === undefined ? '-' : (s.idSet ? 'set' : 'not set')]];
+  const html = rows.map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
+  if ($('ccuKv').innerHTML !== html) $('ccuKv').innerHTML = html;
   $('ccuLinkOn').checked = !!(s.state && s.state !== 'off');
   $('ccuLinkOn').disabled = !linked();
   $('demoOn').checked = ccu.demo;
@@ -1090,24 +1118,25 @@ function ccuConfigReply(m) {
   $('ccuIdMsg').textContent = !m.ok ? 'The cluster did not accept the phone ID.' : m.idSet ? 'Stored on the cluster.' : 'Erased from the cluster.';
   sendLine({ type: 'ccuQuery' }, true).catch(() => {});
 }
+const renderCcuLinks = renderChips;
 
 // demo stream: made-up values at 10 messages per second, through the same decoder
 function setDemo(on) {
   ccu.demo = on;
   clearInterval(ccu.demoT);
-  ccu.fields.clear(); ccu.frames = 0; ccu.rateFrames = [];
+  ccu.fields.clear(); ccu.frames = 0; ccu.rateFrames = []; ccu.raw = []; ccu.rawDirty = true; fieldsLayout = '';
   if (on) {
     ccu.demoStart = Date.now();
-    const toHex2 = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-    onCcuFrame(toHex2(loginFrame(true)));
-    onCcuFrame(toHex2(identityFrame(DEMO_ID)));
-    ccu.demoT = setInterval(() => onCcuFrame(toHex2(liveFrame(demoValues((Date.now() - ccu.demoStart) / 1000)))), 100);
+    const hx = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+    onCcuFrame(hx(loginFrame(true)));
+    onCcuFrame(hx(identityFrame(DEMO_ID)));
+    ccu.demoT = setInterval(() => onCcuFrame(hx(liveFrame(demoValues((Date.now() - ccu.demoStart) / 1000)))), 100);
   } else { ccu.relayOn = null; syncRelay(); }
   log(on ? 'CCU demo data on' : 'CCU demo data off');
-  renderCcuLinks(); renderCcuPage();
+  renderChips(); renderCcuPage();
 }
 
-// captures: IndexedDB on this phone, same line format as CCU Live
+// captures: IndexedDB on this device, same line format as CCU Live
 const capDb = new Promise((res, rej) => {
   const r = indexedDB.open('esp28-captures', 1);
   r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('sessions', { keyPath: 'id' }); d.createObjectStore('chunks', { autoIncrement: true }).createIndex('sid', 'sid'); };
@@ -1126,28 +1155,25 @@ setInterval(() => { flushCapture().catch(() => {}); }, 5000);
 async function toggleRecord() {
   if (ccu.rec) {
     await flushCapture().catch(() => {});
-    status(`Capture saved · ${ccu.rec.frames} messages`, 'ok');
-    ccu.rec = null; syncRelay(); renderEngine(); return;
+    status(`Capture saved · ${ccu.rec.frames} messages (Setup → Captures)`, 'ok');
+    ccu.rec = null; syncRelay(); renderChips(); return;
   }
   const d = new Date(), p = (n) => String(n).padStart(2, '0');
   ccu.rec = { id: `ccu_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${ccu.demo ? '_demo' : ''}`,
     started: Date.now(), startedIso: d.toISOString(), frames: 0, buf: [] };
-  syncRelay(); renderEngine();
+  syncRelay(); renderChips();
 }
 async function renderCaptures() {
   const host = $('capList');
   let all = [];
-  try { all = await req((await capStore('sessions', 'readonly')).getAll()); } catch (_) { host.innerHTML = '<div class="dim">Storage is not available in this browser.</div>'; return; }
+  try { all = await req((await capStore('sessions', 'readonly')).getAll()); } catch (_) { host.innerHTML = '<p class="note">Storage is not available in this browser.</p>'; return; }
   all.sort((a, b) => b.id.localeCompare(a.id));
-  $('moreCaps').textContent = all.length || '';
-  if (!all.length) { host.innerHTML = '<div class="card empty"><b>No captures yet</b><p>Tap Record capture on the Engine tab.</p></div>'; return; }
-  host.innerHTML = '';
-  const list = document.createElement('div'); list.className = 'list';
+  if (!all.length) { host.innerHTML = '<p class="note">No captures yet. Tap Record in the header.</p>'; return; }
+  host.textContent = '';
   for (const c of all) {
-    const row = document.createElement('div'); row.className = 'frow capitem';
-    row.innerHTML = '<div><div class="k"></div><div class="m"></div></div><button class="cap secondary">Download</button><button class="cap danger">Delete</button>';
-    row.querySelector('.k').textContent = c.id;
-    row.querySelector('.m').textContent = `${nf(c.frames)} messages${c.demo ? ' · demo data' : ''}`;
+    const row = document.createElement('div'); row.className = 'capitem';
+    row.innerHTML = '<span></span><button class="btn">Download</button><button class="btn bad">Delete</button>';
+    row.firstChild.textContent = `${c.id} · ${nf(c.frames)} messages${c.demo ? ' · demo' : ''}`;
     const [dl, del] = row.querySelectorAll('button');
     dl.onclick = () => downloadCapture(c.id);
     del.onclick = () => confirmBox(`Delete ${c.id}?`, 'Delete', async () => {
@@ -1155,9 +1181,8 @@ async function renderCaptures() {
       const st = await capStore('chunks', 'readwrite'); keys.forEach((k) => st.delete(k));
       await req((await capStore('sessions', 'readwrite')).delete(c.id)); renderCaptures();
     });
-    list.appendChild(row);
+    host.appendChild(row);
   }
-  host.appendChild(list);
 }
 async function downloadCapture(id) {
   if (ccu.rec && ccu.rec.id === id) await flushCapture();
@@ -1170,20 +1195,27 @@ async function downloadCapture(id) {
 }
 
 // tabs
+const TABS = ['live', 'fields', 'raw', 'bike', 'map', 'setup', 'log'];
 function showTab(tab) {
   document.body.dataset.tab = tab;
-  document.querySelectorAll('.tabbar button').forEach((b) => { const on = b.dataset.tab === tab; b.classList.toggle('on', on); b.setAttribute('aria-current', on ? 'page' : 'false'); });
+  document.querySelectorAll('.tabs button').forEach((b) => { const on = b.dataset.tab === tab; b.classList.toggle('on', on); b.setAttribute('aria-current', on ? 'page' : 'false'); });
   try { localStorage.setItem('esp28.tab', JSON.stringify(tab)); } catch (_) {}
-  $('toast').hidden = true;
   syncRelay();
-  if (tab === 'engine') renderEngine(); if (tab === 'bike') renderBike(); if (tab === 'more') { renderMore(); renderCaptures(); }
+  if (tab === 'map') startMap().catch((e) => status('Map failed: ' + e.message, 'bad'));
+  if (tab === 'setup') { renderDetails(); renderCcuPage(); renderCaptures(); renderSaved(); renderGoogle(); renderAppearance(); renderFirmware(); }
+  ccu.rawDirty = true; tick();
 }
-setInterval(() => {
+// one timer, and only the visible tab is drawn (about 4 times a second)
+function tick() {
+  renderChips();
   const tab = document.body.dataset.tab;
-  if (document.body.classList.contains('paged')) { if (stack.includes('pgCcu')) renderCcuPage(); return; }
-  renderCcuLinks();
-  if (tab === 'engine') renderEngine(); else if (tab === 'bike') renderBike();
-}, 250);
+  if (tab === 'live') renderLive(); else if (tab === 'fields') renderFields(); else if (tab === 'raw') renderRaw();
+  else if (tab === 'bike') renderBike(); else if (tab === 'setup') renderCcuPage();
+}
+setInterval(tick, 250);
+const hdr = document.querySelector('.hdr');
+const setHdr = () => document.documentElement.style.setProperty('--hdr', hdr.offsetHeight + 'px');
+window.addEventListener('resize', setHdr); setHdr();
 
 // ---------- wiring ----------
 $('btnMe').onclick = () => { if (gps.fix && M) M.view(gps.fix.lat, gps.fix.lon, 16); };
@@ -1236,10 +1268,11 @@ $('btnLiveGps').onclick = async () => {
 };
 
 
-document.querySelectorAll('.tabbar button').forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
-$('segRide').onclick = () => { $('segRide').classList.add('on'); $('segFields').classList.remove('on'); $('segRide').setAttribute('aria-selected', 'true'); $('segFields').setAttribute('aria-selected', 'false'); $('engRide').hidden = false; $('engFields').hidden = true; renderEngine(); };
-$('segFields').onclick = () => { $('segFields').classList.add('on'); $('segRide').classList.remove('on'); $('segFields').setAttribute('aria-selected', 'true'); $('segRide').setAttribute('aria-selected', 'false'); $('engRide').hidden = true; $('engFields').hidden = false; renderEngine(); };
-$('showNotFitted').onchange = renderEngine;
+document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
+$('showNotFitted').onchange = () => { fieldsLayout = ''; renderFields(); };
+$('btnRawPause').onclick = () => { ccu.rawPaused = !ccu.rawPaused; $('btnRawPause').textContent = ccu.rawPaused ? 'Resume' : 'Pause'; };
+$('btnRawClear').onclick = () => { ccu.raw = []; ccu.rawDirty = true; renderRaw(true); };
+$('rawLiveOnly').onchange = () => { ccu.rawDirty = true; renderRaw(true); };
 $('btnRecord').onclick = () => { toggleRecord().catch((e) => status('Capture failed: ' + e.message, 'bad')); };
 $('ccuLinkOn').onchange = (e) => { if (!linked()) return; sendLine(ccuLinkLine(e.target.checked)).then(() => sendLine({ type: 'ccuQuery' }, true)).catch(() => {}); };
 $('demoOn').onchange = (e) => setDemo(e.target.checked);
@@ -1264,11 +1297,11 @@ if (/[?&]test\b/.test(location.search)) {
 }
 
 $('ver').textContent = 'Web version ' + VERSION;
-{ let t = 'engine'; try { t = JSON.parse(localStorage.getItem('esp28.tab')) || 'engine'; } catch (_) {} showTab(['engine', 'map', 'bike', 'more'].includes(t) ? t : 'engine'); }
+{ let t = 'live'; try { t = JSON.parse(localStorage.getItem('esp28.tab')) || 'live'; } catch (_) {} showTab(TABS.includes(t) ? t : 'live'); }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (!navigator.bluetooth) status('No Bluetooth in this browser. Open this page in Bluefy.', 'bad');
 if (navigator.geolocation) startWatch();
 log('Web version ' + VERSION);
 watchGoogleConsole();
-startMap();
+
 render();
