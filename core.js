@@ -143,3 +143,67 @@ export const FIELD_MASK = [
   'routes.legs.steps.polyline.encodedPolyline', 'routes.legs.steps.startLocation',
   'routes.legs.steps.navigationInstruction',
 ].join(',');
+
+// ---- route identity (RouteIdentity.kt): first 16 bytes of SHA-256 of the line without "routeId" ----
+export async function withRouteId(line) {
+  const o = { ...line };
+  delete o.routeId;
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(o)));
+  o.routeId = toHex(new Uint8Array(d).slice(0, 16));
+  return o;
+}
+
+// ---- geometry (RouteGeometry.kt): metres, lines as [[lon, lat], ...] ----
+const R = 6371008.8;
+const rad = (d) => (d * Math.PI) / 180;
+export function metersBetween(lat1, lon1, lat2, lon2) {
+  const a = Math.sin(rad(lat2 - lat1) / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(rad(lon2 - lon1) / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+export function distanceToLine(lat, lon, line) {
+  if (!line.length) return Infinity;
+  if (line.length === 1) return metersBetween(lat, lon, line[0][1], line[0][0]);
+  const k = Math.cos(rad(lat));
+  const xy = ([x, y]) => [rad(x - lon) * k * R, rad(y - lat) * R];   // local plane around the fix
+  let best = Infinity;
+  for (let i = 0; i + 1 < line.length; i++) {
+    const [ax, ay] = xy(line[i]); const [bx, by] = xy(line[i + 1]);
+    const dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy;
+    const t = L ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L)) : 0;
+    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+  }
+  return best;
+}
+
+// ---- RerouteDetector.kt: 3 accurate fixes > max(50 m, 1.5 x accuracy) off, 30 s grace, 60 s apart, 5 per trip ----
+export class RerouteDetector {
+  constructor() { this.startTrip(0); }
+  startTrip(now) { this.count = 0; this.last = null; this.streak = 0; this.grace = now; }
+  routeReplaced(now) { this.streak = 0; this.grace = now; }
+  offer(dist, acc, now) {
+    if (acc > 30) return false;
+    if (dist > Math.max(50, 1.5 * acc)) this.streak++; else { this.streak = 0; return false; }
+    if (this.streak < 3 || this.count >= 5) return false;
+    if (now - this.grace < 30000) return false;
+    if (this.last !== null && now - this.last < 60000) return false;
+    this.count++; this.last = now; this.streak = 0;
+    return true;
+  }
+}
+
+// ---- MapAppearance.kt ----
+export const APPEARANCE_DEFAULTS = { dayRoad: 62, dayTerrain: 88, nightRoad: 82, nightTerrain: 16, simulationSpeedKph: 20, clusterThemeMode: 0 };
+export function appearanceLine(a) {
+  const c = (v, lo, hi, d) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : d);
+  const D = APPEARANCE_DEFAULTS;
+  return { type: 'mapAppearance', dayRoad: c(a.dayRoad, 0, 100, D.dayRoad), dayTerrain: c(a.dayTerrain, 0, 100, D.dayTerrain),
+    nightRoad: c(a.nightRoad, 0, 100, D.nightRoad), nightTerrain: c(a.nightTerrain, 0, 100, D.nightTerrain),
+    simulationSpeedKph: c(a.simulationSpeedKph, 5, 300, D.simulationSpeedKph),
+    clusterThemeMode: [0, 1, 2].includes(a.clusterThemeMode) ? a.clusterThemeMode : 0 };
+}
+
+// Indonesian toll roads are named "Jalan Tol ..."; OSRM classes when the server sends them
+export function usesToll(r) {
+  return (r.legs || []).some((l) => (l.steps || []).some((st) => /\btol\b/i.test(st.name || '') ||
+    (st.intersections || []).some((x) => (x.classes || []).some((c) => c === 'toll' || c === 'motorway'))));
+}

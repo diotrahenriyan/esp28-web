@@ -2,81 +2,157 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>ESP 2.8 Companion</title>
 <meta name="theme-color" content="#0f1115">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<script src="leaflet/leaflet.js"></script>
 <style>
   :root { --bg:#0f1115; --card:#191c22; --line:#2a2f38; --text:#eef1f5; --dim:#9aa3b2;
           --accent:#4c8dff; --ok:#3fbf7f; --bad:#ff6b6b; --warn:#f2b84b; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 -apple-system, system-ui, sans-serif;
-         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
-  h1 { font-size:20px; margin:0 0 4px; }
-  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 10px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
-  button { width:100%; min-height:52px; border:0; border-radius:12px; font:600 17px -apple-system, system-ui, sans-serif;
-           background:var(--accent); color:#fff; margin-top:8px; }
-  button.secondary { background:#2a2f38; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:16px/1.4 -apple-system, system-ui, sans-serif; overflow:hidden; }
+  #map { position:fixed; inset:0; background:#1b1f26; }
+  .top { position:fixed; left:12px; right:12px; top:max(12px, env(safe-area-inset-top)); z-index:1000; }
+  .bar { display:flex; gap:8px; }
+  .bar input { flex:1; }
+  .iconbtn { margin-top:0; width:48px; min-width:48px; height:48px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--text); font-size:22px; }
+  input, select { width:100%; height:48px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--text); font-size:17px; padding:0 12px; }
+  #results { margin-top:6px; max-height:45vh; overflow:auto; border-radius:12px; }
+  .sheet { position:fixed; left:0; right:0; bottom:0; z-index:1000; background:var(--card); border-top:1px solid var(--line);
+           border-radius:18px 18px 0 0; padding:12px 16px max(16px, env(safe-area-inset-bottom)); max-height:62vh; overflow:auto; }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  button { min-height:50px; border:0; border-radius:12px; font:600 16px -apple-system, system-ui, sans-serif; background:var(--accent); color:#fff; margin-top:8px; width:100%; padding:0 10px; }
+  button.secondary { background:#2a2f38; color:var(--text); }
   button.danger { background:#5a2328; color:#ffd6d6; }
+  button.on { background:var(--ok); color:#06210f; }
   button:disabled { opacity:.4; }
-  input, select { width:100%; min-height:48px; border-radius:10px; border:1px solid var(--line); background:#0f1115;
-          color:var(--text); font-size:17px; padding:0 12px; margin-top:8px; }
-  .status { padding:12px; border-radius:10px; background:#11141a; border:1px solid var(--line); }
-  .status.ok { border-color:var(--ok); color:#c8f2dc; }
-  .status.bad { border-color:var(--bad); color:#ffd0d0; }
-  .status.warn { border-color:var(--warn); color:#ffe7b8; }
+  .status { padding:10px 12px; border-radius:10px; background:#11141a; border:1px solid var(--line); font-size:15px; }
+  .status.ok { border-color:var(--ok); color:#c8f2dc; } .status.bad { border-color:var(--bad); color:#ffd0d0; } .status.warn { border-color:var(--warn); color:#ffe7b8; }
   .dim { color:var(--dim); font-size:14px; }
-  .result { background:#11141a; border:1px solid var(--line); text-align:left; padding:10px 12px; font-weight:400; }
+  .result { display:block; background:#11141a; border:1px solid var(--line); text-align:left; padding:10px 12px; font-weight:400; margin-top:6px; color:var(--text); }
   .result b { display:block; font-size:16px; } .result span { color:var(--dim); font-size:14px; }
+  .result.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
   .result.toll b { color:var(--bad); }
-  ol { margin:8px 0 0; padding-left:20px; color:var(--dim); font-size:14px; }
-  pre { white-space:pre-wrap; font-size:12px; color:var(--dim); max-height:240px; overflow:auto; margin:8px 0 0; }
-  details summary { color:var(--dim); font-size:14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:16px 0 4px; }
+  .dest { font-size:18px; font-weight:600; margin-top:12px; }
+  .page { position:fixed; inset:0; z-index:2000; background:var(--bg); overflow:auto; padding:max(12px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  .page header { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .page header b { font-size:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
+  label.slider { display:block; margin-top:14px; } input[type=range] { height:32px; padding:0; border:0; background:none; }
+  pre { white-space:pre-wrap; font-size:12px; color:var(--dim); margin:8px 0 0; }
+  .kv { display:grid; grid-template-columns: 1fr auto; gap:6px 12px; font-size:15px; } .kv span:nth-child(odd) { color:var(--dim); }
+  .preview { height:90px; border-radius:12px; margin-top:12px; position:relative; overflow:hidden; border:1px solid var(--line); }
+  .preview i { position:absolute; left:-10%; right:-10%; top:42px; height:8px; transform:rotate(-8deg); }
+  .modal { position:fixed; inset:0; z-index:3000; background:rgba(0,0,0,.6); display:flex; align-items:flex-end; }
+  .modal .card { width:100%; margin:0; border-radius:18px 18px 0 0; padding-bottom:max(16px, env(safe-area-inset-bottom)); }
+  .leaflet-control-attribution { font-size:10px; }
+  .me { width:16px; height:16px; border-radius:50%; background:var(--accent); border:3px solid #fff; box-shadow:0 0 0 2px rgba(76,141,255,.4); }
+  [hidden] { display:none !important; }
 </style>
 </head>
 <body>
-  <h1>ESP 2.8 Companion</h1>
-  <div class="dim" id="fw">Web version 2.8-w0.2.1</div>
+  <div id="map"></div>
 
-  <div class="card">
-    <h2>Cluster</h2>
-    <div id="status" class="status">Not connected</div>
-    <ol id="regHint">
-      <li>On the cluster, go to the phone page and hold BOOT to open registration (60 seconds).</li>
-      <li>Tap Register this iPhone and choose "ESP 2.8 Cluster".</li>
-      <li>Tap Pair on the iPhone, then confirm the same code on the cluster.</li>
-    </ol>
-    <button id="btnRegister">Register this iPhone</button>
-    <button id="btnConnect" hidden>Connect</button>
-    <button id="btnDisconnect" class="secondary" hidden>Disconnect</button>
-  </div>
-
-  <div class="card">
-    <h2>Share GPS</h2>
-    <div class="dim">Keep this page open and the screen on while riding. iOS stops GPS when the screen is off.</div>
-    <button id="btnGps" disabled>Share GPS</button>
-    <div class="dim" id="gpsInfo"></div>
-  </div>
-
-  <div class="card">
-    <h2>Destination</h2>
-    <input id="q" placeholder="Search a place" autocomplete="off" enterkeyhint="search">
-    <button id="btnSearch" class="secondary">Search</button>
+  <div class="top">
+    <div class="bar">
+      <button class="iconbtn" id="btnMenu" aria-label="Settings">☰</button>
+      <input id="q" placeholder="Search a place" autocomplete="off" enterkeyhint="search">
+      <button class="iconbtn" id="btnMe" aria-label="Show my location">◎</button>
+    </div>
     <div id="results"></div>
-    <div id="routes"></div>
-    <button id="btnStop" class="danger" disabled>Stop navigation</button>
   </div>
 
-  <div class="card">
-    <details>
-      <summary>Settings and log</summary>
-      <div class="dim">Maps and routes: &copy; OpenStreetMap contributors (Nominatim, OSRM). Free, no account. Routes that use a toll road are marked.</div>
-      <button id="btnForget" class="secondary">Erase pairing data on this phone</button>
-      <pre id="log"></pre>
-    </details>
+  <div class="sheet">
+    <div id="status" class="status">Not connected</div>
+    <div class="row">
+      <button id="btnLink">Connect cluster</button>
+      <button id="btnGps" class="secondary" disabled>Share GPS</button>
+    </div>
+    <div id="destBox" hidden>
+      <div class="dest" id="destName"></div>
+      <div class="dim" id="destInfo"></div>
+      <div id="routes"></div>
+      <div class="row">
+        <button id="btnSend" disabled>Send route to cluster</button>
+        <button id="btnSave" class="secondary">Save place</button>
+      </div>
+      <button id="btnClear" class="secondary">Close</button>
+    </div>
+    <button id="btnStop" class="danger" hidden>Stop navigation</button>
+    <div class="dim" style="margin-top:8px">Hold a spot on the map to drive there.</div>
   </div>
+
+  <!-- Settings -->
+  <div class="page" id="pgSettings" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Settings</b></header>
+    <button class="secondary" data-open="pgPairing">Cluster pairing</button>
+    <button class="secondary" data-open="pgDetails">Bike details</button>
+    <button class="secondary" data-open="pgSaved">Saved places</button>
+    <button class="secondary" data-open="pgAppearance">Map appearance</button>
+    <button class="secondary" data-open="pgDebug">Diagnostics and simulation</button>
+    <button class="secondary" data-open="pgLog">Log</button>
+    <div class="dim" style="margin-top:16px" id="ver">Web version 2.8-w0.3.0</div>
+    <div class="dim">Maps, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.</div>
+  </div>
+
+  <div class="page" id="pgPairing" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Cluster pairing</b></header>
+    <div class="card">
+      <div id="pairState" class="status">…</div>
+      <ol class="dim">
+        <li>On the cluster, open the phone page and hold BOOT for 2 seconds (registration stays open 60 seconds).</li>
+        <li>Tap Register this iPhone and choose "ESP 2.8 Cluster".</li>
+        <li>Tap Pair on the iPhone, then confirm the same code on the cluster.</li>
+      </ol>
+      <button id="btnRegister">Register this iPhone</button>
+      <button id="btnForget" class="secondary">Erase pairing data on this phone</button>
+      <div class="dim">After erasing, also remove "ESP 2.8 Cluster" in iPhone Settings → Bluetooth (ⓘ → Forget This Device) before registering again.</div>
+    </div>
+  </div>
+
+  <div class="page" id="pgDetails" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Bike details</b></header>
+    <div class="card"><div class="kv" id="details"></div></div>
+    <div class="dim">Data link: Bluetooth (MUTECH-BLE/2) to the cluster.</div>
+  </div>
+
+  <div class="page" id="pgSaved" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Saved places</b></header>
+    <div id="savedList"></div>
+    <div class="dim" id="savedEmpty">No saved places yet. Pick a destination, then tap Save place.</div>
+  </div>
+
+  <div class="page" id="pgAppearance" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Map appearance</b></header>
+    <div class="dim">Tune day and night separately. Changes are saved and sent to the cluster. The cluster's offline map keeps its own colours: road and terrain brightness are not applied there yet.</div>
+    <div class="preview" id="preview"><i></i></div>
+    <button class="secondary" id="btnPreviewMode">Previewing day. Tap for night</button>
+    <label class="slider"><span id="lblRoad"></span><input type="range" id="slRoad" min="5" max="100"></label>
+    <label class="slider"><span id="lblTerrain"></span><input type="range" id="slTerrain" min="5" max="100"></label>
+    <button class="secondary" id="btnResetMode">Reset this mode</button>
+    <button class="secondary" id="btnClusterTheme">Cluster theme: Auto</button>
+  </div>
+
+  <div class="page" id="pgDebug" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Diagnostics and simulation</b></header>
+    <div class="dim">Test movement and inspect the link. Simulation is not live GPS.</div>
+    <button id="btnSimulate">Simulate selected route</button>
+    <div class="dim" id="simHint">Choose a destination and route first.</div>
+    <label class="slider"><span id="lblSim"></span><input type="range" id="slSim" min="5" max="300"></label>
+    <button class="secondary" id="btnLiveGps">Use phone GPS · stop simulation</button>
+  </div>
+
+  <div class="page" id="pgLog" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Log</b></header>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="modal" id="modal" hidden><div class="card" id="modalBody"></div></div>
 
   <script type="module" src="app.js"></script>
 </body>
