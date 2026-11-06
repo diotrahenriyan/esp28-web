@@ -133,7 +133,7 @@ export function osrmRouteLine(r, dest) {
     return st;
   });
   return { type: 'route', name: (dest.name || 'Destination').slice(0, 60), latitude: dest.lat, longitude: dest.lon,
-    distanceMeters: r.distance || 0, durationSeconds: r.duration || 0, simulation: false, exclusions: 'toll',
+    distanceMeters: r.distance || 0, durationSeconds: r.duration || 0, simulation: false,
     geometry: { type: 'LineString', coordinates: r.geometry.coordinates.map(([x, y]) => [r5(x), r5(y)]) }, steps };
 }
 

@@ -230,32 +230,38 @@ async function search() {
   } catch (e) { status('Search failed: ' + e.message, 'bad'); log('Search: ' + e.message); }
 }
 
-async function osrm(from, to, exclude) {
+async function osrm(from, to) {
   const u = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}` +
-    `?overview=full&geometries=geojson&steps=true&alternatives=true${exclude ? '&exclude=toll' : ''}`;
+    '?overview=full&geometries=geojson&steps=true&alternatives=3';
   const r = await fetch(u);
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.code !== 'Ok') throw new Error(j.message || j.code || `HTTP ${r.status}`);
   return j.routes || [];
 }
 
+// toll classes when the server sends them; in Indonesia toll roads are also named "Jalan Tol ..."
+function usesToll(r) {
+  return (r.legs || []).some((l) => (l.steps || []).some((st) => /\btol\b/i.test(st.name || '') ||
+    (st.intersections || []).some((x) => (x.classes || []).some((c) => c === 'toll' || c === 'motorway'))));
+}
+
 async function previewRoutes() {
   status('Planning the route…');
   try {
     here = await myPosition();
-    let routes;
-    try { routes = await osrm(here, picked, true); }
-    catch (e) { log('Route without tolls failed (' + e.message + '), trying without the toll rule'); routes = await osrm(here, picked, false); }
+    // the free router cannot avoid tolls: flag routes that use toll / motorway roads, toll-free first
+    const routes = (await osrm(here, picked)).map((r) => ({ r, toll: usesToll(r) })).sort((a, b) => a.toll - b.toll);
     const box = $('routes');
     box.innerHTML = '';
-    routes.forEach((r, i) => {
+    routes.forEach(({ r, toll }, i) => {
       const b = document.createElement('button');
-      b.className = 'result';
-      b.innerHTML = `<b>Route ${i + 1}: ${Math.round(r.duration / 60)} min</b><span>${(r.distance / 1000).toFixed(1)} km, no traffic data. Tap to send to the cluster</span>`;
+      b.className = 'result' + (toll ? ' toll' : '');
+      b.innerHTML = `<b>Route ${i + 1}: ${Math.round(r.duration / 60)} min${toll ? '. Uses a toll road, not for motorbikes' : ''}</b><span>${(r.distance / 1000).toFixed(1)} km, no traffic data. Tap to send to the cluster</span>`;
       b.onclick = () => sendRoute(osrmRouteLine(r, picked));
       box.appendChild(b);
     });
-    status(routes.length ? 'Pick a route' : 'No route found', routes.length ? '' : 'bad');
+    const allToll = routes.length && routes.every((x) => x.toll);
+    status(!routes.length ? 'No route found' : (allToll ? 'Every route found uses a toll road' : 'Pick a route'), routes.length && !allToll ? '' : 'bad');
   } catch (e) { status('Route failed: ' + e.message, 'bad'); log('Route: ' + e.message); }
 }
 
