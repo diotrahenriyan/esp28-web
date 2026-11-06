@@ -20,8 +20,9 @@ const BASE = `http://localhost:${server.address().port}/`;
 const stub = (mode) => `(() => {
   const ls = [];
   class MVC { addListener(e, f) { ls.push([this, e, f]); return { remove() {} }; } setMap() {} setPosition() {} }
-  class Map extends MVC { constructor(el) { super(); el.innerHTML = '<div id="gmap">GOOGLE</div>'; el.style.overflow = 'hidden';
-    ${mode === 'ok' ? "setTimeout(() => ls.filter(([o, e]) => o === this && e === 'tilesloaded').forEach(([, , f]) => f()), 200);" : ''} }
+  class Map extends MVC { constructor(el) { super(); el.style.position = 'relative'; el.style.overflow = 'hidden'; el.insertAdjacentHTML('beforeend', '<div class="gm-stub">GOOGLE</div>');
+    const tall = el.getBoundingClientRect().height > 0;
+    ${mode === 'ok' ? "if (tall) setTimeout(() => ls.filter(([o, e]) => o === this && e === 'tilesloaded').forEach(([, , f]) => f()), 200);" : ''} }
     setCenter() {} setZoom() {} getCenter() { return { lat: () => -6.9, lng: () => 107.6 }; } fitBounds() {} }
   window.google = { maps: {
     importLibrary: async (n) => n === 'maps' ? { Map, Polyline: MVC } : { Marker: MVC },
@@ -53,7 +54,8 @@ async function run(mode, key, waitMs, act) {
   const r = await page.evaluate(() => ({
     log: document.getElementById('log').textContent,
     leaflet: !!document.querySelector('#map.leaflet-container'),
-    google: !!document.getElementById('gmap'),
+    google: !!document.querySelector('.gm-stub'),
+    gHeight: (document.getElementById('gmap') || { getBoundingClientRect: () => ({ height: -1 }) }).getBoundingClientRect().height,
     mapStyle: document.getElementById('map').getAttribute('style') || '',
     status: document.getElementById('status').textContent,
   }));
@@ -65,7 +67,7 @@ let r = await run('none', '', 1500);
 check('no key → OpenStreetMap', r.leaflet && !r.google && /Map: OpenStreetMap/.test(r.log));
 
 r = await run('ok', 'TESTKEY', 2000);
-check('good key → Google map stays', r.google && !r.leaflet && /Map: Google/.test(r.log) && /tiles loaded/.test(r.log));
+check('good key → Google map stays, full height', r.gHeight > 0 && r.google && !r.leaflet && /Map: Google/.test(r.log) && /tiles loaded/.test(r.log));
 
 r = await run('authAfterLoad', 'TESTKEY', 2500);
 check('key rejected after load → falls back to OpenStreetMap', r.leaflet && !r.google, r.status);

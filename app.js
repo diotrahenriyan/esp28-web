@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.2';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.3';
 
-const VERSION = '2.8-w0.5.2';
+const VERSION = '2.8-w0.5.3';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -401,7 +401,12 @@ async function googleMap() {
   meter('map');
   const { Map, Polyline } = await google.maps.importLibrary('maps');
   const { Marker } = await google.maps.importLibrary('marker');
-  const el = $('map');
+  // Google writes position:relative onto its container, which on #map (position:fixed; inset:0)
+  // drops the inset and leaves a 0 px tall map. Give Google its own child that fills #map.
+  const el = document.createElement('div');
+  el.id = 'gmap';
+  el.style.cssText = 'position:absolute;inset:0';
+  $('map').appendChild(el);
   const map = new Map(el, { center: { lat: -6.9147, lng: 107.6098 }, zoom: 13, disableDefaultUI: true, clickableIcons: false, gestureHandling: 'greedy' });
   // a map that never draws a tile is blank: give it 15 s, then fall back
   let tiles = false;
