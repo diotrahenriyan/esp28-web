@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.0';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.1';
 
-const VERSION = '2.8-w0.5.0';
+const VERSION = '2.8-w0.5.1';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -310,13 +310,47 @@ function leafletMap() {
     onHold(cb) { map.on('contextmenu', (e) => cb(e.latlng.lat, e.latlng.lng)); },
   };
 }
+// Google reports key and project problems through window.gm_authFailure and as console errors
+// named "...MapError", usually AFTER the script has loaded (so a load promise never sees them).
+// Bluefy has no console: both go to the Log, and a fatal one switches the map to OpenStreetMap.
+const MAP_ERRORS = {
+  ApiNotActivatedMapError: 'Maps JavaScript API is not enabled in the key\'s project',
+  ApiTargetBlockedMapError: 'the key\'s API restrictions do not include Maps JavaScript API',
+  BillingNotEnabledMapError: 'the key\'s project has no billing account linked',
+  RefererNotAllowedMapError: 'the key\'s website restriction does not allow ' + location.origin,
+  InvalidKeyMapError: 'the key is wrong or was deleted',
+  ExpiredKeyMapError: 'the key has expired',
+  DeletedApiProjectMapError: 'the key\'s project was deleted',
+  ProjectDeniedMapError: 'Google denied the key\'s project',
+  ApiProjectMapError: 'the key or its project is not usable',
+  OverQuotaMapError: 'the project is over its quota',
+  MissingKeyMapError: 'no key reached Google',
+};
+let gmFail = () => {};
+function watchGoogleConsole() {
+  for (const lvl of ['error', 'warn']) {
+    const orig = console[lvl].bind(console);
+    console[lvl] = (...a) => {
+      orig(...a);
+      const t = a.map(String).join(' ');
+      if (!/Google Maps|MapError|maps\.googleapis/i.test(t)) return;
+      const name = (t.match(/\b[A-Za-z]+MapError\b/) || [])[0];
+      log(`Google ${lvl}: ` + (name ? `${name} (${MAP_ERRORS[name] || 'see Google error docs'}) ` : '') +
+        t.replace(/key=[^&\s]+/g, 'key=…').slice(0, 300));
+      if (name && MAP_ERRORS[name]) gmFail(name + ': ' + MAP_ERRORS[name]);
+    };
+  }
+}
 function loadGoogle(key) {
   return new Promise((res, rej) => {
-    window.gm_authFailure = () => rej(new Error('Google rejected the key for maps (enable "Maps JavaScript API" for it)'));
+    window.gm_authFailure = () => {
+      rej(new Error('Google rejected the key for maps'));
+      gmFail('Google rejected the key for maps (gm_authFailure)');
+    };
     window.__gmReady = res;
     const s = document.createElement('script');
     s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&v=weekly&loading=async&callback=__gmReady`;
-    s.onerror = () => rej(new Error('Google Maps did not load'));
+    s.onerror = () => rej(new Error('Google Maps did not load (network)'));
     document.head.appendChild(s);
     setTimeout(() => rej(new Error('Google Maps did not load in 15 s')), 15000);
   });
@@ -328,6 +362,10 @@ async function googleMap() {
   const { Marker } = await google.maps.importLibrary('marker');
   const el = $('map');
   const map = new Map(el, { center: { lat: -6.9147, lng: 107.6098 }, zoom: 13, disableDefaultUI: true, clickableIcons: false, gestureHandling: 'greedy' });
+  // a map that never draws a tile is blank: give it 15 s, then fall back
+  let tiles = false;
+  google.maps.event.addListenerOnce(map, 'tilesloaded', () => { tiles = true; log('Google map tiles loaded'); });
+  setTimeout(() => { if (!tiles) gmFail('Google map tiles did not load in 15 s'); }, 15000);
   let me = null, dest = null, lines = [], holdT = null;
   const path = (c) => c.map(([x, y]) => ({ lat: y, lng: x }));
   return {
@@ -359,17 +397,38 @@ async function googleMap() {
   };
 }
 let googleTried = false;
+let googleFailed = '';
+// swap whatever map is there for OpenStreetMap (Google leaves its own styles on #map: start clean)
+function useOsm(reason) {
+  if (M && M.kind === 'osm') return;
+  if (reason) { log('Google map failed: ' + reason); status(`Google map failed: ${reason}. Using OpenStreetMap (see Log).`, 'warn'); }
+  const old = $('map'), fresh = old.cloneNode(false);
+  fresh.removeAttribute('style');
+  old.replaceWith(fresh);
+  M = leafletMap();
+  log('Map: OpenStreetMap');
+  wireMap();
+}
+function wireMap() {
+  followed = false;
+  M.onHold((lat, lon) => setDestination({ name: 'Dropped pin', lat, lon }));
+  if (gps.fix) drawMe();
+  if (nav.dest) M.dest(nav.dest);
+  if (nav.choices.length) drawRoutes(nav.choices, nav.sel);
+  $('mapAttrib').textContent = M.kind === 'google' ? 'Map, search and routes: Google. Live traffic on motorbike and car routes.'
+    : 'Map, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.';
+}
 async function startMap() {
   if (gkey()) {
     googleTried = true;
+    log('Google map: loading for ' + location.origin);
+    gmFail = (reason) => { if (googleFailed) return; googleFailed = reason; if (M && M.kind === 'google') useOsm(reason); };
     try { M = await googleMap(); log('Map: Google'); }
-    catch (e) { log('Google map failed: ' + e.message); status(e.message + '. Using OpenStreetMap.', 'warn'); $('map').innerHTML = ''; }
+    catch (e) { useOsm(googleFailed || e.message); return; }
+    if (googleFailed) { useOsm(googleFailed); return; }
   }
   if (!M) { M = leafletMap(); log('Map: OpenStreetMap'); }
-  M.onHold((lat, lon) => setDestination({ name: 'Dropped pin', lat, lon }));
-  if (gps.fix) drawMe();
-  $('mapAttrib').textContent = M.kind === 'google' ? 'Map, search and routes: Google. Live traffic on motorbike and car routes.'
-    : 'Map, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.';
+  wireMap();
 }
 function drawMe() {
   const f = gps.fix;
@@ -557,7 +616,7 @@ function renderGoogle() {
     row('autocomplete', 'Search suggestions'), row('details', 'Place details')].join('\n');
   $('googleState').textContent = !gkey() ? 'No key: the app uses free OpenStreetMap.'
     : M && M.kind === 'google' ? 'Google is on: map, search and routes.'
-    : googleTried ? 'The Google map did not load (see Log). Search and routes still use Google.'
+    : googleTried ? `The Google map did not load${googleFailed ? ': ' + googleFailed : ''}. Search and routes still use Google.`
     : 'Key saved. Tap Reload to apply.';
 }
 
@@ -858,5 +917,6 @@ $('ver').textContent = 'Web version ' + VERSION;
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (!navigator.bluetooth) status('No Bluetooth in this browser. Open this page in Bluefy.', 'bad');
 if (navigator.geolocation) startWatch();
+watchGoogleConsole();
 startMap();
 render();
