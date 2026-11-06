@@ -340,8 +340,12 @@ async function setDestination(d) {
   if (destMarker) destMarker.remove();
   destMarker = L.marker([d.lat, d.lon]).addTo(map);
   render();
-  const from = gps.fix || await new Promise((res) => navigator.geolocation.getCurrentPosition(
-    (p) => res({ lat: p.coords.latitude, lon: p.coords.longitude }), () => res(null), { enableHighAccuracy: true, timeout: 15000 }));
+  // a pending permission prompt never times out on its own: give up after 20 s
+  const from = gps.fix || await new Promise((res) => {
+    setTimeout(() => res(null), 20000);
+    navigator.geolocation.getCurrentPosition((p) => res({ lat: p.coords.latitude, lon: p.coords.longitude }), () => res(null),
+      { enableHighAccuracy: true, timeout: 15000 });
+  });
   if (!from) { $('destInfo').textContent = 'Location unavailable: allow location for this page.'; return; }
   try {
     nav.choices = (await osrm(from, d)).map((r) => ({ r, toll: usesToll(r) })).sort((a, b) => a.toll - b.toll);
