@@ -60,23 +60,23 @@ const searchAndPick = async (page) => {
   if (b) { await b.click(); await page.waitForTimeout(1500); }
 };
 
-let r = await run({ month: MONTH, map: 8999 });
-check('map loads 8,999 → Google map', r.hits.gmaps === 1 && !r.leaflet);
+let r = await run({ month: MONTH, map: 9899 });
+check('map loads 9,899 → Google map', r.hits.gmaps === 1 && !r.leaflet);
 
-r = await run({ month: MONTH, map: 9000 });
-check('map loads 9,000 (90% of 10,000) → no Google request, OpenStreetMap', r.hits.gmaps === 0 && r.leaflet);
-check('  Log explains the limit', /map loads: 9000 this month, limit 9000/.test(r.log));
+r = await run({ month: MONTH, map: 9900 });
+check('map loads 9,900 (99% of 10,000) → no Google request, OpenStreetMap', r.hits.gmaps === 0 && r.leaflet);
+check('  Log explains the limit', /map loads: 9900 this month, limit 9900 \(99% of 10000 free\)/.test(r.log));
 
 r = await run({ month: '2000-01', map: 9999 });
 check('last month\'s count does not block this month', r.hits.gmaps === 1);
 
-r = await run({ month: MONTH, map: 9000, autocomplete: 9000, routeMoto: 900 }, searchAndPick);
+r = await run({ month: MONTH, map: 9900, autocomplete: 9900, routeMoto: 990 }, searchAndPick);
 check('search limit reached → Nominatim, no Places call', r.hits.places === 0 && r.hits.nominatim === 1, JSON.stringify(r.hits));
-check('motorbike route limit reached (900 of 1,000) → OSRM, no Routes call', r.hits.routes === 0 && r.hits.osrm === 1, JSON.stringify(r.hits));
-check('  Log explains the route limit', /motorbike routes: 900 this month, limit 900/.test(r.log));
+check('motorbike route limit reached (990 of 1,000) → OSRM, no Routes call', r.hits.routes === 0 && r.hits.osrm === 1, JSON.stringify(r.hits));
+check('  Log explains the route limit', /motorbike routes: 990 this month, limit 990/.test(r.log));
 
-r = await run({ month: MONTH, map: 9000, autocomplete: 9000, routeMoto: 899 }, searchAndPick);
-check('motorbike routes 899 → Google Routes used', r.hits.routes === 1 && r.hits.osrm === 0, JSON.stringify(r.hits));
+r = await run({ month: MONTH, map: 9900, autocomplete: 9900, routeMoto: 989 }, searchAndPick);
+check('motorbike routes 989 → Google Routes used', r.hits.routes === 1 && r.hits.osrm === 0, JSON.stringify(r.hits));
 
 await browser.close();
 server.close();

@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.5';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.6';
 
-const VERSION = '2.8-w0.5.5';
+const VERSION = '2.8-w0.5.6';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -255,9 +255,10 @@ function meter(sku) {
 // location (Place Details Essentials) 10,000.
 const FREE = { map: 10000, routeCar: 5000, routeMoto: 1000, autocomplete: 10000, details: 10000 };
 // Hard stop on this phone: Google's daily quotas cannot be changed on this account, so the app stops
-// calling Google for a SKU at 90 % of its free amount this month and uses OpenStreetMap instead.
-// The 10 % margin covers Google's billing month (Pacific time) against this count (UTC month).
-const CAP_SHARE = 0.9;
+// calling Google for a SKU at 99 % of its free amount this month and uses OpenStreetMap instead
+// (Operator ruling 2026-11-06 23:46). The 1 % margin is small against Google's billing month
+// (Pacific time) versus this count (UTC month); the free trial covers any overshoot until 2027-02-05.
+const CAP_SHARE = 0.99;
 const LABEL = { map: 'map loads', routeCar: 'car routes', routeMoto: 'motorbike routes', autocomplete: 'search suggestions', details: 'place details' };
 const capOf = (sku) => Math.floor(FREE[sku] * CAP_SHARE);
 function used(sku) {
@@ -271,7 +272,7 @@ function useGoogle(sku, quiet = false) {
   if (used(sku) < capOf(sku)) return true;
   if (!quiet && !capLogged[sku]) {
     capLogged[sku] = true;
-    log(`Google ${LABEL[sku]}: ${used(sku)} this month, limit ${capOf(sku)} (90% of ${FREE[sku]} free). Using OpenStreetMap until next month.`);
+    log(`Google ${LABEL[sku]}: ${used(sku)} this month, limit ${capOf(sku)} (${Math.round(CAP_SHARE * 100)}% of ${FREE[sku]} free). Using OpenStreetMap until next month.`);
     status(`Google free limit for ${LABEL[sku]} reached this month: using OpenStreetMap.`, 'warn');
   }
   return false;
