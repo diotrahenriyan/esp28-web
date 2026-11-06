@@ -92,11 +92,12 @@
     <header><button class="iconbtn" data-back>‹</button><b>Settings</b></header>
     <button class="secondary" data-open="pgPairing">Cluster pairing</button>
     <button class="secondary" data-open="pgDetails">Bike details</button>
+    <button class="secondary" data-open="pgFirmware">Firmware update</button>
     <button class="secondary" data-open="pgSaved">Saved places</button>
     <button class="secondary" data-open="pgAppearance">Map appearance</button>
     <button class="secondary" data-open="pgDebug">Diagnostics and simulation</button>
     <button class="secondary" data-open="pgLog">Log</button>
-    <div class="dim" style="margin-top:16px" id="ver">Web version 2.8-w0.3.0</div>
+    <div class="dim" style="margin-top:16px" id="ver">Web version 2.8-w0.4.0</div>
     <div class="dim">Maps, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.</div>
   </div>
 
@@ -119,6 +120,21 @@
     <header><button class="iconbtn" data-back>‹</button><b>Bike details</b></header>
     <div class="card"><div class="kv" id="details"></div></div>
     <div class="dim">Data link: Bluetooth (MUTECH-BLE/2) to the cluster.</div>
+  </div>
+
+  <div class="page" id="pgFirmware" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Firmware update</b></header>
+    <div class="card"><div id="fwInstalled" class="dim">Cluster: not connected</div></div>
+    <div class="dim">Choose the image file on this iPhone (Files): speedo.bin for the app, updater.bin for the updater. The cluster only accepts images signed with its own key.</div>
+    <input type="file" id="fwFile" accept=".bin,application/octet-stream" style="padding-top:12px">
+    <div class="card" id="fwInfo" hidden><div class="kv" id="fwKv"></div><div id="fwVerdict" class="status" style="margin-top:10px"></div></div>
+    <button id="btnFwInstall" disabled>Install on the cluster</button>
+    <div class="card" id="fwProgress" hidden>
+      <div id="fwStep">…</div>
+      <div style="height:10px;background:#11141a;border-radius:6px;margin-top:10px;overflow:hidden"><div id="fwBar" style="height:100%;width:0;background:var(--accent)"></div></div>
+      <button id="btnFwCancel" class="danger">Cancel update</button>
+    </div>
+    <div class="dim">Keep the bike stopped, this page open and the screen on until it finishes. The cluster checks the image's signature and SHA-256 before switching; if anything fails it keeps the current firmware.</div>
   </div>
 
   <div class="page" id="pgSaved" hidden>

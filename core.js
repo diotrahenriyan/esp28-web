@@ -207,3 +207,88 @@ export function usesToll(r) {
   return (r.legs || []).some((l) => (l.steps || []).some((st) => /\btol\b/i.test(st.name || '') ||
     (st.intersections || []).some((x) => (x.classes || []).some((c) => c === 'toll' || c === 'motorway'))));
 }
+
+// ---- firmware update over BLE (ota_proto.h, FirmwareUpdate.kt) ----
+export const OTA = '6d757465-6368-4c4e-4b00-000000000004';
+export const OTA_MAX = { app: 0x300000, updater: 0x180000 };
+export const OTA_PAYLOAD = 176;   // frame 180 bytes: fits the iPhone's ATT MTU (185) minus 3
+
+// esp_app_desc_t at 0x20 of an ESP-IDF image: version, project name, build date, ELF SHA-256
+export function appDesc(bytes) {
+  if (bytes.length < 0x20 + 176 || bytes[0] !== 0xe9) return null;
+  const d = new DataView(bytes.buffer, bytes.byteOffset + 0x20, 176);
+  if (d.getUint32(0, true) !== 0xabcd5432) return null;
+  const str = (o, n) => new TextDecoder().decode(bytes.subarray(0x20 + o, 0x20 + o + n)).replace(/\0.*$/s, '');
+  return { version: str(16, 32), project: str(48, 32), time: str(80, 16), date: str(96, 16),
+    build: toHex(bytes.subarray(0x20 + 144, 0x20 + 152)) };
+}
+
+// the cluster's build id (9 or 16 hex) is a prefix of the image's (UpdateCheck.buildMatches)
+export const buildMatches = (board, image) => {
+  const b = (board || '').trim().toLowerCase(), m = (image || '').trim().toLowerCase();
+  return b.length >= 9 && b.length <= m.length && /^[0-9a-f]+$/.test(b) && m.startsWith(b);
+};
+export const plainVersion = (v) => { const t = (v || '').trim(); return /^v\d/.test(t) ? t.slice(1) : t; };
+
+// UpdateCheck.decide: 'update' | 'rebuild' | 'current' | 'unknown'
+export function otaDecide(desc, target, status) {
+  if (!status) return 'unknown';
+  if (target === 'updater') return plainVersion(status.updaterVersion) === plainVersion(desc.version) ? 'current' : 'update';
+  const v = plainVersion(status.clusterVersion);
+  if (!v) return 'unknown';
+  if (v !== plainVersion(desc.version)) return 'update';
+  if (status.build && desc.build && !buildMatches(status.build, desc.build)) return 'rebuild';
+  return 'current';
+}
+
+export function otaFrame(data, offset, payload) {
+  const len = Math.min(payload, data.length - offset);
+  const f = new Uint8Array(4 + len);
+  new DataView(f.buffer).setUint32(0, offset, true);
+  f.set(data.subarray(offset, offset + len), 4);
+  return f;
+}
+
+// OtaSender (FirmwareUpdate.kt): window from otaReady, progress / retry acks, stall resend, timeouts
+export class OtaSender {
+  constructor(data, payload = OTA_PAYLOAD) {
+    Object.assign(this, { data, payload, state: 'waitReady', error: null, sent: 0, acked: 0, window: 0,
+      startedAt: 0, lastAckAt: 0, endSentAt: 0, endSent: false });
+  }
+  start(now) { this.startedAt = now; this.lastAckAt = now; }
+  percent() { return Math.max(0, Math.min(100, Math.floor((this.acked * 100) / this.data.length))); }
+  nextFrame() {
+    if (this.state !== 'sending' || this.sent >= this.data.length) return null;
+    const len = Math.min(this.payload, this.data.length - this.sent);
+    if (this.sent - this.acked + len > this.window) return null;
+    const f = otaFrame(this.data, this.sent, this.payload);
+    this.sent += len;
+    return f;
+  }
+  endDue() { return this.state === 'sending' && this.acked >= this.data.length && !this.endSent; }
+  markEndSent(now) { if (!this.endDue()) return; this.endSent = true; this.endSentAt = now; this.lastAckAt = now; this.state = 'waitDone'; }
+  onMessage(m, now) {
+    if (m.type === 'otaReady') {
+      if (this.state !== 'waitReady') return;
+      if (!(m.window >= this.payload)) return this.fail("The cluster's transfer window is too small");
+      this.window = m.window; this.state = 'sending'; this.lastAckAt = now;
+    } else if (m.type === 'otaAck') {
+      if (this.state !== 'sending' && this.state !== 'waitDone') return;
+      const x = m.offset;
+      if (!(x >= 0) || x > this.sent) return;
+      if (m.retry) { this.sent = x; this.acked = Math.min(this.acked, x); this.lastAckAt = now; this.endSent = false; this.state = 'sending'; }
+      else if (x > this.acked) { this.acked = x; this.lastAckAt = now; }
+    } else if (m.type === 'otaDone') {
+      if (this.state === 'waitDone') this.state = 'done'; else if (this.state !== 'done') this.fail('Unexpected reply from the cluster');
+    } else if (m.type === 'otaError') this.fail(m.text || 'The cluster refused the update');
+  }
+  tick(now) {
+    if (this.state === 'waitReady' && now - this.startedAt > 10000) this.fail('The cluster did not accept the update');
+    else if (this.state === 'sending') {
+      if (now - this.lastAckAt > 20000) { this.fail('The cluster stopped answering'); return; }
+      const len = Math.min(this.payload, this.data.length - this.sent);
+      if (this.sent < this.data.length && this.sent - this.acked + len > this.window && now - this.lastAckAt > 4000) { this.sent = this.acked; this.lastAckAt = now; }
+    } else if (this.state === 'waitDone' && now - this.endSentAt > 120000) this.fail('The cluster did not finish the update');
+  }
+  fail(reason) { if (this.state === 'done' || this.state === 'failed') return; this.state = 'failed'; this.error = reason; }
+}

@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll } from './core.js';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js';
 
-const VERSION = '2.8-w0.3.0';
+const VERSION = '2.8-w0.4.0';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -56,7 +56,7 @@ const STATUS_HINT = {
 };
 
 // ---------- BLE link ----------
-const link = { dev: null, rx: null, chain: Promise.resolve(), authed: false, register: false,
+const link = { dev: null, rx: null, ota: null, chain: Promise.resolve(), authed: false, register: false,
   bikeNonce: null, phoneNonce: null, lastSent: 0, lastStatusAsk: 0, since: 0, device: null, routeAck: '',
   awaitingRouteId: null, routeQueryAt: 0 };
 
@@ -92,6 +92,7 @@ async function connect(register) {
     const svc = await server.getPrimaryService(SVC);
     link.rx = await svc.getCharacteristic(RX);
     const tx = await svc.getCharacteristic(TX);
+    link.ota = await svc.getCharacteristic(OTA).catch(() => null);
     const asm = new LineAssembler(onLine);
     tx.addEventListener('characteristicvaluechanged', (e) =>
       asm.feed(new Uint8Array(e.target.value.buffer, e.target.value.byteOffset, e.target.value.byteLength)));
@@ -117,6 +118,7 @@ async function connect(register) {
 
 function onDisconnect() {
   link.authed = false;
+  if (fw.running && fw.sender && fw.sender.state !== 'done') fw.sender.fail('Disconnected');
   log('Disconnected');
   status('Cluster disconnected. Tap Connect cluster.', 'bad');
   render();
@@ -125,7 +127,7 @@ function onDisconnect() {
 async function onLine(line) {
   let m;
   try { m = JSON.parse(line); } catch (_) { return; }
-  if (!['challenge', 'deviceStatus'].includes(m.type)) log('← ' + line.slice(0, 160));
+  if (!['challenge', 'deviceStatus', 'otaAck'].includes(m.type)) log('← ' + line.slice(0, 160));
   switch (m.type) {
     case 'registered':
       if (!link.register || m.protocol !== PROTOCOL || !/^04[0-9a-f]{128}$/i.test(m.bikePub || '')) return;
@@ -156,7 +158,8 @@ async function onLine(line) {
       onLinked();
       break;
     }
-    case 'deviceStatus': link.device = m; renderDetails(); break;
+    case 'deviceStatus': link.device = m; renderDetails(); checkUpdated(); renderFirmware(); break;
+    case 'otaReady': case 'otaAck': case 'otaDone': case 'otaError': otaMessage(m); break;
     case 'routeAck':
       link.routeAck = `${m.points} points, ${m.steps} steps, ${(m.meters / 1000).toFixed(1)} km${m.simulation ? ', simulated' : ''}`;
       status(m.simulation ? 'Simulation running on the cluster' : `Route on the cluster: ${(m.meters / 1000).toFixed(1)} km`, 'ok');
@@ -189,7 +192,7 @@ async function onLinked() {
 
 // keep the link busy (ping after 5 s quiet), device status every 30 s, route reply timeout 2 s
 setInterval(() => {
-  if (!linked()) return;
+  if (!linked() || fw.running) return;
   const now = Date.now();
   if (link.awaitingRouteId && now - link.routeQueryAt >= 2000) { link.awaitingRouteId = null; if (nav.line) sendRouteLine(nav.line); }
   if (now - link.lastStatusAsk >= 30000) { link.lastStatusAsk = now; sendLine({ type: 'networkStatus' }, true).catch(() => {}); }
@@ -210,7 +213,7 @@ function onFix(p) {
   gps.fix = { lat: c.latitude, lon: c.longitude, acc: c.accuracy || 0, heading: c.heading, speed: c.speed, t: p.timestamp };
   drawMe();
   // GpsFixGate: only fixes taken after sharing started, at most 10 s old
-  if (gps.sharing && linked() && p.timestamp >= gps.since && Date.now() - p.timestamp <= 10000) {
+  if (gps.sharing && linked() && !fw.running && p.timestamp >= gps.since && Date.now() - p.timestamp <= 10000) {
     write(enc.encode(JSON.stringify(locationLine(c, p.timestamp)) + '\n')).catch(() => {});
     keepRoute();
   }
@@ -448,9 +451,135 @@ function saveAppearance() {
   if (linked()) sendLine(appearanceLine(appearance)).catch(() => {});
 }
 
+
+// ---------- firmware update (FirmwareUpdater.kt flow, image from a file instead of the update server) ----------
+const fw = { image: null, desc: null, target: 'app', running: false, sender: null, lock: null };
+
+function renderFirmware() {
+  const d = link.device;
+  $('fwInstalled').textContent = !linked() || !d ? 'Cluster: not connected over Bluetooth'
+    : `Installed: ${plainVersion(d.clusterVersion) || '?'}${d.build ? ' · build ' + d.build.slice(0, 8) : ''} · updater ${plainVersion(d.updaterVersion) || 'none'}`;
+  const ok = !!fw.desc;
+  $('fwInfo').hidden = !ok;
+  let can = false;
+  if (ok) {
+    const rows = [['File', fw.name], ['Size', `${(fw.image.length / 1024).toFixed(0)} KB`], ['Kind', fw.target === 'updater' ? 'Updater' : 'App'],
+      ['Version', fw.desc.version], ['Build', fw.desc.build], ['Built', `${fw.desc.date} ${fw.desc.time}`]];
+    $('fwKv').innerHTML = '';
+    for (const [k, v] of rows) { const a = document.createElement('span'); a.textContent = k; const b = document.createElement('span'); b.textContent = v; $('fwKv').append(a, b); }
+    const r = otaDecide(fw.desc, fw.target, linked() ? d : null);
+    const v = $('fwVerdict');
+    if (fw.image.length > OTA_MAX[fw.target]) { v.textContent = 'Too large for this slot on the cluster.'; v.className = 'status bad'; }
+    else if (fw.target === 'app' && d && !(d.updaterVersion || '').trim()) { v.textContent = 'The cluster has no valid updater: install updater.bin first.'; v.className = 'status bad'; }
+    else if (r === 'unknown') { v.textContent = 'Connect the cluster to compare versions.'; v.className = 'status warn'; }
+    else if (r === 'current') { v.textContent = 'The cluster already runs this image.'; v.className = 'status'; can = true; }
+    else { v.textContent = r === 'rebuild' ? 'Same version, different build: installable.' : 'Newer or different version: installable.'; v.className = 'status ok'; can = true; }
+  }
+  $('btnFwInstall').disabled = !can || !linked() || !link.ota || fw.running;
+  if (linked() && !link.ota) $('fwInstalled').textContent += '. This cluster has no update channel.';
+}
+
+$('fwFile').onchange = async (e) => {
+  const f = e.target.files[0];
+  fw.image = null; fw.desc = null;
+  if (f) {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    const d = appDesc(bytes);
+    if (!d) { status('Not an ESP32 firmware image', 'bad'); }
+    else { fw.image = bytes; fw.desc = d; fw.name = f.name; fw.target = d.project === 'updater' ? 'updater' : 'app'; }
+  }
+  renderFirmware();
+};
+
+$('btnFwInstall').onclick = () => confirmBox(
+  `Install ${fw.target === 'updater' ? 'updater' : 'firmware'} ${fw.desc.version} on the cluster? Keep the bike stopped and this page open. ${fw.target === 'app' ? 'The cluster restarts twice.' : ''}`,
+  'Install', startOta);
+
+async function startOta() {
+  const sha = toHex(await crypto.subtle.digest('SHA-256', fw.image));
+  fw.sender = new OtaSender(fw.image);
+  fw.running = true;
+  fw.before = link.device ? plainVersion(link.device.clusterVersion) : null;
+  try { fw.lock = await navigator.wakeLock.request('screen'); } catch (_) {}
+  $('fwProgress').hidden = false;
+  $('fwStep').textContent = 'Preparing the cluster…';
+  renderFirmware();
+  log(`OTA ${fw.target} ${fw.desc.version} ${fw.image.length} bytes sha ${sha.slice(0, 16)}`);
+  try {
+    await sendLine({ type: 'otaBegin', size: fw.image.length, sha256: sha, version: fw.desc.version, target: fw.target });
+  } catch (e) { fw.sender.fail(e.message); }
+  fw.sender.start(Date.now());
+  pumpOta();
+}
+
+function otaMessage(m) {
+  if (!fw.sender) return;
+  fw.sender.onMessage(m, Date.now());
+  if (m.type === 'otaAck' && m.retry) log(`OTA resend from ${m.offset}`);
+}
+
+async function pumpOta() {
+  const s = fw.sender;
+  const w = link.ota.writeValueWithoutResponse ? (f) => link.ota.writeValueWithoutResponse(f) : (f) => link.ota.writeValue(f);
+  let lastUi = 0;
+  while (s.state !== 'done' && s.state !== 'failed') {
+    const now = Date.now();
+    s.tick(now);
+    const f = s.nextFrame();
+    if (f) {
+      const p = link.chain.then(() => w(f));
+      link.chain = p.catch(() => {});
+      try { await p; } catch (e) { log('OTA write: ' + e.message); await new Promise((r) => setTimeout(r, 30)); }
+    } else {
+      if (s.endDue()) { s.markEndSent(now); sendLine({ type: 'otaEnd' }).catch((e) => s.fail(e.message)); }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (now - lastUi > 250) {
+      lastUi = now;
+      $('fwBar').style.width = s.percent() + '%';
+      $('fwStep').textContent = s.state === 'waitReady' ? 'Preparing the cluster (erasing)…'
+        : s.state === 'waitDone' ? 'Checking the image on the cluster…' : `Sending ${s.percent()}%`;
+    }
+  }
+  fw.running = false;
+  if (fw.lock) { fw.lock.release().catch(() => {}); fw.lock = null; }
+  if (s.state === 'done') {
+    $('fwBar').style.width = '100%';
+    if (fw.target === 'app') {
+      store.set('otaExpect', { version: fw.desc.version, build: fw.desc.build, before: fw.before });
+      $('fwStep').textContent = 'Installing on the cluster… it restarts twice. Tap Connect cluster again in about 1 minute.';
+      status('Installing on the cluster… it restarts twice', 'warn');
+    } else {
+      $('fwStep').textContent = 'Updater installed';
+      status('Updater installed', 'ok');
+      sendLine({ type: 'networkStatus' }, true).catch(() => {});
+    }
+  } else {
+    $('fwStep').textContent = 'Update failed: ' + s.error + '. The cluster keeps its current firmware.';
+    status('Update failed: ' + s.error, 'bad');
+    if (linked()) sendLine({ type: 'otaAbort' }, true).catch(() => {});
+  }
+  renderFirmware();
+}
+$('btnFwCancel').onclick = () => { if (fw.sender && fw.running) fw.sender.fail('Cancelled'); };
+
+// after the restart: what the cluster runs now (UpdateCheck.restart)
+function checkUpdated() {
+  const e = store.get('otaExpect', null);
+  const d = link.device;
+  if (!e || !d) return;
+  store.set('otaExpect', null);
+  const v = plainVersion(d.clusterVersion);
+  const r = otaDecide({ version: e.version, build: e.build }, 'app', d);
+  if (r === 'current') status(`Updated · the cluster now runs ${v}`, 'ok');
+  else if (v === plainVersion(e.version)) status(`The cluster runs ${v} but a different build`, 'warn');
+  else if (e.before && v === e.before) status(`The update was rolled back · the cluster still runs ${v}`, 'bad');
+  else status(`The cluster runs ${v}`, 'warn');
+}
+
 // ---------- pages, dialogs ----------
 const stack = [];
-function openPage(id) { $(id).hidden = false; stack.push(id); if (id === 'pgSaved') renderSaved(); if (id === 'pgDetails') renderDetails(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance(); render(); }
+function openPage(id) { $(id).hidden = false; stack.push(id); if (id === 'pgSaved') renderSaved(); if (id === 'pgDetails') renderDetails(); if (id === 'pgFirmware') renderFirmware(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance(); render(); }
 function closePages() { while (stack.length) $(stack.pop()).hidden = true; }
 document.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => { const id = stack.pop(); if (id) $(id).hidden = true; }));
 document.querySelectorAll('[data-open]').forEach((b) => (b.onclick = () => openPage(b.dataset.open)));
