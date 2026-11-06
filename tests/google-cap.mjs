@@ -43,7 +43,7 @@ async function run(usage, act) {
     body: JSON.stringify([{ name: 'Gedung Sate', display_name: 'Gedung Sate, Bandung', lat: '-6.9025', lon: '107.6188' }]) }); });
   await page.route('https://router.project-osrm.org/**', (r) => { hits.osrm++; r.fulfill({ contentType: 'application/json', body: OSRM }); });
   await page.route('https://tile.openstreetmap.org/**', (r) => r.fulfill({ status: 204 }));
-  await page.addInitScript(([u]) => { localStorage.setItem('esp28.gkey', JSON.stringify('TESTKEY')); localStorage.setItem('esp28.usage', JSON.stringify(u)); }, [usage]);
+  await page.addInitScript(([u]) => { localStorage.setItem('esp28.gkey', JSON.stringify('TESTKEY')); localStorage.setItem('esp28.usage', JSON.stringify(u)); localStorage.setItem('esp28.tab', '"map"'); }, [usage]);
   await page.goto(BASE);
   await page.waitForTimeout(1200);
   if (act) await act(page);

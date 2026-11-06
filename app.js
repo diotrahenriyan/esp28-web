@@ -3,9 +3,11 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.6';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.6.0';
+import { CcuFields, CCU_STATES, ccuConfigLine, ccuLinkLine, ccuRelayLine, validPhoneId, captureLine, liveFrame, identityFrame, loginFrame,
+  demoValues, DEMO_ID, V as ST_V, P as ST_P, U as ST_U, X as ST_X, N as ST_N } from './ccu.js?v=2.8-w0.6.0';
 
-const VERSION = '2.8-w0.5.6';
+const VERSION = '2.8-w0.6.0';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -20,7 +22,13 @@ function log(msg) {
   const t = new Date().toTimeString().slice(0, 8);
   $('log').textContent = `${t} ${msg}\n` + $('log').textContent.slice(0, 30000);
 }
-function status(text, cls = '') { const s = $('status'); s.textContent = text; s.className = 'status ' + cls; }
+let toastT = null;
+function status(text, cls = '') {
+  const s = $('status'); s.textContent = text; s.className = 'banner ' + cls;
+  if (document.body.dataset.tab === 'map' || document.body.classList.contains('paged')) return;
+  const t = $('toast'); t.textContent = text; t.className = 'toast ' + cls; t.hidden = false;
+  clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, cls === 'bad' ? 8000 : 4000);
+}
 
 // ---------- IndexedDB: the phone key (non-extractable) and the cluster's key ----------
 const db = new Promise((res, rej) => {
@@ -127,7 +135,7 @@ function onDisconnect() {
 async function onLine(line) {
   let m;
   try { m = JSON.parse(line); } catch (_) { return; }
-  if (!['challenge', 'deviceStatus', 'otaAck'].includes(m.type)) log('← ' + line.slice(0, 160));
+  if (!['challenge', 'deviceStatus', 'otaAck', 'ccuFrame', 'ccuState'].includes(m.type)) log('← ' + line.slice(0, 160));
   switch (m.type) {
     case 'registered':
       if (!link.register || m.protocol !== PROTOCOL || !/^04[0-9a-f]{128}$/i.test(m.bikePub || '')) return;
@@ -159,6 +167,9 @@ async function onLine(line) {
       break;
     }
     case 'deviceStatus': link.device = m; renderDetails(); checkUpdated(); renderFirmware(); break;
+    case 'ccuState': ccu.state = m; ccu.stateAt = Date.now(); renderCcuLinks(); break;
+    case 'ccuFrame': if (!ccu.demo) onCcuFrame(m.h); break;
+    case 'ccuConfig': ccuConfigReply(m); break;
     case 'otaReady': case 'otaAck': case 'otaDone': case 'otaError': otaMessage(m); break;
     case 'routeAck':
       link.routeAck = `${m.points} points, ${m.steps} steps, ${(m.meters / 1000).toFixed(1)} km${m.simulation ? ', simulated' : ''}`;
@@ -188,6 +199,9 @@ async function onLinked() {
   await sendLine({ type: 'gpsSharing', enabled: gps.sharing });
   if (nav.line) { link.awaitingRouteId = nav.line.routeId; link.routeQueryAt = Date.now(); await sendLine({ type: 'routeQuery' }); }
   await sendLine(appearanceLine(appearance));
+  ccu.relayOn = null;   // the cluster starts with the relay off at each connection
+  await sendLine({ type: 'ccuQuery' }, true).catch(() => {});
+  syncRelay();
 }
 
 // keep the link busy (ping after 5 s quiet), device status every 30 s, route reply timeout 2 s
@@ -713,7 +727,7 @@ function renderSaved() {
     card.querySelector('b').textContent = p.name;
     card.querySelector('.dim').textContent = `${p.latitude.toFixed(5)}, ${p.longitude.toFixed(5)}`;
     const [go, ren, del] = card.querySelectorAll('button');
-    go.onclick = () => { closePages(); setDestination({ name: p.name, lat: p.latitude, lon: p.longitude }); };
+    go.onclick = () => { closePages(); showTab('map'); setDestination({ name: p.name, lat: p.latitude, lon: p.longitude }); };
     ren.onclick = () => askName('Rename place', p.name, (n) => { const a = saved(); a[i].name = n; store.set('saved', a); renderSaved(); });
     del.onclick = () => confirmBox(`Delete "${p.name}"?`, 'Delete', () => { const a = saved(); a.splice(i, 1); store.set('saved', a); renderSaved(); });
     list.appendChild(card);
@@ -881,9 +895,9 @@ function checkUpdated() {
 
 // ---------- pages, dialogs ----------
 const stack = [];
-function openPage(id) { $(id).hidden = false; stack.push(id); if (id === 'pgSaved') renderSaved(); if (id === 'pgDetails') renderDetails(); if (id === 'pgFirmware') renderFirmware(); if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance(); render(); }
-function closePages() { while (stack.length) $(stack.pop()).hidden = true; }
-document.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => { const id = stack.pop(); if (id) $(id).hidden = true; }));
+function openPage(id) { $(id).hidden = false; stack.push(id); document.body.classList.add('paged'); if (id === 'pgSaved') renderSaved(); if (id === 'pgCluster') renderDetails(); if (id === 'pgCcu') renderCcuPage(); if (id === 'pgCaptures') renderCaptures(); if (id === 'pgFirmware') renderFirmware(); if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance(); render(); }
+function closePages() { while (stack.length) $(stack.pop()).hidden = true; document.body.classList.remove('paged'); }
+document.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => { const id = stack.pop(); if (id) $(id).hidden = true; if (!stack.length) document.body.classList.remove('paged'); renderMore(); }));
 document.querySelectorAll('[data-open]').forEach((b) => (b.onclick = () => openPage(b.dataset.open)));
 function modal(build) {
   const body = $('modalBody');
@@ -931,20 +945,247 @@ async function render() {
   const reg = !!(await kv('bikePub'));
   const on = !!(link.dev && link.dev.gatt.connected);
   $('btnLink').textContent = on ? 'Disconnect cluster' : (reg ? 'Connect cluster' : 'Register this iPhone');
-  $('btnLink').className = on && link.authed ? 'on' : '';
+  $('btnLink').className = 'cap' + (on && link.authed ? ' on' : '');
   $('btnGps').textContent = gps.sharing ? 'GPS sharing on' : 'Share GPS';
-  $('btnGps').className = gps.sharing ? 'on' : 'secondary';
+  $('btnGps').className = 'cap ' + (gps.sharing ? 'on' : 'secondary');
   $('btnGps').disabled = !linked();
   $('btnSend').disabled = !linked() || !nav.choices.length;
   $('btnStop').hidden = !(linked() && nav.line);
   $('btnSimulate').disabled = !nav.choices.length || !linked();
   $('simHint').hidden = nav.choices.length > 0;
   $('pairState').textContent = reg ? 'This phone is registered with a cluster.' : 'Not registered yet.';
-  if (stack.includes('pgDetails')) renderDetails();
+  if (stack.includes('pgCluster')) renderDetails();
+  const label = $('btnLink').textContent;
+  document.querySelectorAll('.js-link').forEach((b) => { b.textContent = label; b.className = 'cap js-link' + (on && link.authed ? ' on' : ''); });
+  renderCcuLinks(); renderMore();
 }
 
+
+// ---------- Yamaha CCU through the cluster (ccu.js: decoder and relay contract) ----------
+const ccu = { fields: new CcuFields(), state: null, stateAt: 0, relayOn: null, demo: false, demoT: null, demoStart: 0,
+  frames: 0, lastFrameAt: 0, rateFrames: [], rec: null };
+const STATUS_CLASS = { [ST_V]: 'verified', [ST_P]: 'plausible', [ST_U]: 'unknown', [ST_X]: 'notverified', [ST_N]: 'notfitted' };
+const nf = (v, d = 0) => (typeof v === 'number' ? v.toLocaleString('id-ID', { minimumFractionDigits: d, maximumFractionDigits: d }) : (v ?? '–'));
+function onCcuFrame(h) {
+  let b;
+  try { b = fromHex(h); } catch (_) { return; }
+  ccu.fields.decode(b);
+  const now = Date.now();
+  ccu.frames++; ccu.lastFrameAt = now; ccu.rateFrames.push(now);
+  if (ccu.rec) { ccu.rec.buf.push(captureLine(now, h.toLowerCase())); ccu.rec.frames++; }
+}
+// the relay runs while Engine or Bike is on screen, or while recording
+function wantRelay() { return ccu.rec !== null || ['engine', 'bike'].includes(document.body.dataset.tab); }
+function syncRelay() {
+  if (!linked() || ccu.demo) return;
+  const want = wantRelay();
+  if (ccu.relayOn === want) return;
+  ccu.relayOn = want;
+  sendLine(ccuRelayLine(want), true).catch(() => { ccu.relayOn = null; });
+}
+function ccuStateName() {
+  if (ccu.demo) return 'Demo data';
+  if (!linked()) return 'Off';
+  if (!ccu.state) return 'Waiting for the cluster';
+  return CCU_STATES[ccu.state.state] || ccu.state.state;
+}
+function rate() {
+  const now = Date.now();
+  ccu.rateFrames = ccu.rateFrames.filter((t) => now - t < 5000);
+  return ccu.rateFrames.length / 5;
+}
+function renderCcuLinks() {
+  const on = linked();
+  $('pillCluster').textContent = on ? 'Linked' : (link.dev && link.dev.gatt.connected ? 'Connecting' : 'Not connected');
+  $('dotCluster').className = 'dot ' + (on ? 'ok' : '');
+  const st = ccu.demo ? 'streaming' : (on && ccu.state ? ccu.state.state : 'off');
+  const live = Date.now() - ccu.lastFrameAt < 3000;
+  $('pillCcu').textContent = ccu.demo ? 'Demo data' : (st === 'streaming' && live ? 'Streaming' : ccuStateName());
+  $('dotCcu').className = 'dot ' + (st === 'streaming' && live ? 'ok' : st === 'rejected' ? 'bad' : ['scanning', 'connecting', 'reconnecting'].includes(st) ? 'warn' : '');
+  $('demoTag').hidden = !ccu.demo;
+}
+function renderMore() {
+  $('moreCluster').textContent = linked() ? 'Linked' : 'Not connected';
+  $('moreCcu').textContent = ccuStateName();
+  $('moreSaved').textContent = saved().length || '';
+  $('moreGoogle').textContent = gkey() ? 'On' : 'Off';
+}
+function setTile(id, v, d) { $(id).textContent = v === undefined ? '–' : nf(v, d); }
+function renderEngine() {
+  const f = ccu.fields, g = (k) => f.get(k);
+  const has = g('rpm') !== undefined;
+  setTile('vRpm', g('rpm'), 0); setTile('vSpeed', g('speed'), 0); setTile('vEng', g('eng'), 0); setTile('vBatt', g('batt'), 1);
+  setTile('vThr', g('thr'), 0); setTile('vOdo', g('L0048'), 1); setTile('vMap', g('map'), 0);
+  $('barRpm').style.width = has ? Math.min(100, g('rpm') / 100) + '%' : '0';
+  $('barThr').style.width = g('thr') !== undefined ? Math.min(100, g('thr')) + '%' : '0';
+  document.querySelectorAll('.vs[data-k]').forEach((e) => {
+    const r = f.rows.get(e.dataset.k); const st = r ? r.status : '';
+    e.textContent = st && st !== ST_V ? st : ''; e.className = 'vs ' + (STATUS_CLASS[st] || '');
+  });
+  const w = f.warning();
+  $('attention').className = 'attention ' + (w.level === 'unknown' ? '' : w.level);
+  $('attentionText').textContent = w.text;
+  $('engEmpty').hidden = has;
+  $('engEmptyWhy').textContent = !linked() ? 'Connect the cluster. The cluster connects to the Yamaha CCU and passes its data to this phone.'
+    : !ccu.state ? 'The cluster has not reported the CCU yet. Firmware 0.1.5 or later is needed for the CCU link.'
+    : ccu.state.state === 'noId' ? 'Send the phone ID to the cluster first.'
+    : ccu.state.state === 'off' ? 'Turn on "Cluster connects to the CCU".'
+    : ccu.state.state === 'rejected' ? 'The CCU rejected the phone ID. Check it in Yamaha CCU settings.'
+    : 'Turn the key ON. The cluster is ' + ccuStateName().toLowerCase() + '.';
+  if (!$('engFields').hidden) renderFieldRows($('fieldGroups'), f.groups(!$('showNotFitted').checked));
+  $('recLabel').textContent = ccu.rec ? `Stop recording · ${clock(Date.now() - ccu.rec.started)} · ${ccu.rec.frames} messages` : 'Record capture';
+  $('btnRecord').className = 'cap' + (ccu.rec ? ' rec' : '');
+  $('btnRecord').disabled = !ccu.rec && !ccu.demo && !linked();
+}
+const clock = (ms) => { const s = Math.floor(ms / 1000); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+function fmtVal(r) {
+  if (typeof r.value === 'number') return nf(r.value, Number.isInteger(r.value) ? 0 : (Math.abs(r.value) < 100 ? 2 : 1));
+  return r.value;
+}
+function renderFieldRows(host, groups, opts = {}) {
+  const html = [];
+  for (const [name, rows] of groups) {
+    html.push(`<h2>${esc(opts.rename?.[name] || name)}</h2><div class="list">`);
+    for (const r of rows) {
+      const unit = ['raw', 'hex', 'text', 'count', ''].includes(r.unit) ? '' : r.unit;
+      const range = typeof r.value === 'number' && r.min !== r.max ? `${nf(r.min, Number.isInteger(r.min) ? 0 : 1)} – ${nf(r.max, Number.isInteger(r.max) ? 0 : 1)}` : '';
+      html.push(`<div class="frow"><div class="k">${esc(r.label)}</div><div class="v">${esc(fmtVal(r))}${unit ? `<small>${esc(unit)}</small>` : ''}</div>
+        <div class="m"><span class="vs ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>${r.unit === 'raw' || r.unit === 'hex' ? `<span>${r.unit === 'raw' ? 'raw value' : 'hexadecimal'}</span>` : ''}${range ? `<span>${range}</span>` : ''}</div></div>`);
+    }
+    html.push('</div>');
+  }
+  host.innerHTML = html.join('') || '<div class="card empty"><b>No data yet</b><p>Fields appear as the CCU sends them.</p></div>';
+}
+const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const BIKE_GROUPS = [
+  ['Identity', ['Lf190', 'Lf197', 'Lf194']],
+  ['Lifetime', ['L0048', 'Lf702', 'Lf1a2', 'Lf1a1', 'Lf701', 'Lff67']],
+  ['Faults', ['fcnt', 'dtc', 'L023a', 'Lf421', 'Lf44d']],
+];
+function renderBike() {
+  const f = ccu.fields, groups = [];
+  const used = new Set();
+  for (const [name, keys] of BIKE_GROUPS) {
+    const rows = keys.map((k) => { used.add(k); return f.rows.get(k); }).filter(Boolean);
+    if (rows.length) groups.push([name, rows]);
+  }
+  const stats = [...f.rows.values()].filter((r) => r.group === 'Statistics (raw)');
+  if (stats.length) groups.push(['Statistics (raw)', stats]);
+  const model = f.get('Lf197');
+  $('bikeTitle').textContent = model ? `Model ${model}` : 'Bike';
+  $('bikeSub').textContent = ccu.demo ? 'Demo data: made-up values.' : 'Read from the CCU once per connection.';
+  renderFieldRows($('bikeGroups'), groups);
+}
+function renderCcuPage() {
+  const s = ccu.state || {};
+  const rows = [['State', ccuStateName()], ['CCU', s.name || '–'], ['Signal', s.rssi ? `${s.rssi} dBm` : '–'],
+    ['Messages', nf(ccu.demo ? ccu.frames : (s.frames ?? ccu.frames))], ['Per second', nf(rate(), 1)], ['Heartbeats', nf(s.heartbeats ?? 0)], ['Reconnects', nf(s.reconnects ?? 0)],
+    ['Phone ID on the cluster', s.idSet === undefined ? '–' : (s.idSet ? 'Set' : 'Not set')]];
+  $('ccuKv').innerHTML = rows.map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
+  $('ccuLinkOn').checked = !!(s.state && s.state !== 'off');
+  $('ccuLinkOn').disabled = !linked();
+  $('demoOn').checked = ccu.demo;
+}
+function ccuConfigReply(m) {
+  $('ccuIdMsg').textContent = !m.ok ? 'The cluster did not accept the phone ID.' : m.idSet ? 'Stored on the cluster.' : 'Erased from the cluster.';
+  sendLine({ type: 'ccuQuery' }, true).catch(() => {});
+}
+
+// demo stream: made-up values at 10 messages per second, through the same decoder
+function setDemo(on) {
+  ccu.demo = on;
+  clearInterval(ccu.demoT);
+  ccu.fields.clear(); ccu.frames = 0; ccu.rateFrames = [];
+  if (on) {
+    ccu.demoStart = Date.now();
+    const toHex2 = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+    onCcuFrame(toHex2(loginFrame(true)));
+    onCcuFrame(toHex2(identityFrame(DEMO_ID)));
+    ccu.demoT = setInterval(() => onCcuFrame(toHex2(liveFrame(demoValues((Date.now() - ccu.demoStart) / 1000)))), 100);
+  } else { ccu.relayOn = null; syncRelay(); }
+  log(on ? 'CCU demo data on' : 'CCU demo data off');
+  renderCcuLinks(); renderCcuPage();
+}
+
+// captures: IndexedDB on this phone, same line format as CCU Live
+const capDb = new Promise((res, rej) => {
+  const r = indexedDB.open('esp28-captures', 1);
+  r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('sessions', { keyPath: 'id' }); d.createObjectStore('chunks', { autoIncrement: true }).createIndex('sid', 'sid'); };
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+});
+const capStore = async (name, mode) => (await capDb).transaction(name, mode).objectStore(name);
+const req = (r) => new Promise((ok, no) => { r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error); });
+async function flushCapture() {
+  const c = ccu.rec;
+  if (!c || !c.buf.length) return;
+  const text = c.buf.join(''); c.buf = [];
+  await req((await capStore('chunks', 'readwrite')).add({ sid: c.id, text }));
+  await req((await capStore('sessions', 'readwrite')).put({ id: c.id, frames: c.frames, started: c.startedIso, demo: ccu.demo }));
+}
+setInterval(() => { flushCapture().catch(() => {}); }, 5000);
+async function toggleRecord() {
+  if (ccu.rec) {
+    await flushCapture().catch(() => {});
+    status(`Capture saved · ${ccu.rec.frames} messages`, 'ok');
+    ccu.rec = null; syncRelay(); renderEngine(); return;
+  }
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  ccu.rec = { id: `ccu_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${ccu.demo ? '_demo' : ''}`,
+    started: Date.now(), startedIso: d.toISOString(), frames: 0, buf: [] };
+  syncRelay(); renderEngine();
+}
+async function renderCaptures() {
+  const host = $('capList');
+  let all = [];
+  try { all = await req((await capStore('sessions', 'readonly')).getAll()); } catch (_) { host.innerHTML = '<div class="dim">Storage is not available in this browser.</div>'; return; }
+  all.sort((a, b) => b.id.localeCompare(a.id));
+  $('moreCaps').textContent = all.length || '';
+  if (!all.length) { host.innerHTML = '<div class="card empty"><b>No captures yet</b><p>Tap Record capture on the Engine tab.</p></div>'; return; }
+  host.innerHTML = '';
+  const list = document.createElement('div'); list.className = 'list';
+  for (const c of all) {
+    const row = document.createElement('div'); row.className = 'frow capitem';
+    row.innerHTML = '<div><div class="k"></div><div class="m"></div></div><button class="cap secondary">Download</button><button class="cap danger">Delete</button>';
+    row.querySelector('.k').textContent = c.id;
+    row.querySelector('.m').textContent = `${nf(c.frames)} messages${c.demo ? ' · demo data' : ''}`;
+    const [dl, del] = row.querySelectorAll('button');
+    dl.onclick = () => downloadCapture(c.id);
+    del.onclick = () => confirmBox(`Delete ${c.id}?`, 'Delete', async () => {
+      const keys = await req((await capStore('chunks', 'readonly')).index('sid').getAllKeys(c.id));
+      const st = await capStore('chunks', 'readwrite'); keys.forEach((k) => st.delete(k));
+      await req((await capStore('sessions', 'readwrite')).delete(c.id)); renderCaptures();
+    });
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+}
+async function downloadCapture(id) {
+  if (ccu.rec && ccu.rec.id === id) await flushCapture();
+  const chunksOf = await req((await capStore('chunks', 'readonly')).index('sid').getAll(id));
+  const blob = new Blob(chunksOf.map((c) => c.text), { type: 'text/plain' });
+  const name = id + '.log';
+  try { const file = new File([blob], name, { type: 'text/plain' }); if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; } } catch (_) {}
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+
+// tabs
+function showTab(tab) {
+  document.body.dataset.tab = tab;
+  document.querySelectorAll('.tabbar button').forEach((b) => { const on = b.dataset.tab === tab; b.classList.toggle('on', on); b.setAttribute('aria-current', on ? 'page' : 'false'); });
+  try { localStorage.setItem('esp28.tab', JSON.stringify(tab)); } catch (_) {}
+  $('toast').hidden = true;
+  syncRelay();
+  if (tab === 'engine') renderEngine(); if (tab === 'bike') renderBike(); if (tab === 'more') { renderMore(); renderCaptures(); }
+}
+setInterval(() => {
+  const tab = document.body.dataset.tab;
+  if (document.body.classList.contains('paged')) { if (stack.includes('pgCcu')) renderCcuPage(); return; }
+  renderCcuLinks();
+  if (tab === 'engine') renderEngine(); else if (tab === 'bike') renderBike();
+}, 250);
+
 // ---------- wiring ----------
-$('btnMenu').onclick = () => openPage('pgSettings');
 $('btnMe').onclick = () => { if (gps.fix && M) M.view(gps.fix.lat, gps.fix.lon, 16); };
 $('q').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(searchT); search(true); } };
 $('q').oninput = () => { clearTimeout(searchT); if (useGoogle('autocomplete', true) && useGoogle('details', true)) searchT = setTimeout(() => search(false), 400); };
@@ -955,6 +1196,7 @@ $('btnTestKey').onclick = () => { testKey(); };
   store.set('routeOptions', { mode: $('optMode').value, tolls: $('optTolls').checked, highways: $('optHighways').checked, ferries: $('optFerries').checked });
   if (nav.dest) setDestination(nav.dest);
 }));
+document.querySelectorAll('.js-link').forEach((b) => (b.onclick = () => $('btnLink').onclick()));
 $('btnLink').onclick = async () => {
   if (link.dev && link.dev.gatt.connected) { if (gps.sharing) await setSharing(false); link.dev.gatt.disconnect(); return; }
   connect(false);
@@ -993,7 +1235,36 @@ $('btnLiveGps').onclick = async () => {
   closePages(); setSharing(true);
 };
 
+
+document.querySelectorAll('.tabbar button').forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
+$('segRide').onclick = () => { $('segRide').classList.add('on'); $('segFields').classList.remove('on'); $('segRide').setAttribute('aria-selected', 'true'); $('segFields').setAttribute('aria-selected', 'false'); $('engRide').hidden = false; $('engFields').hidden = true; renderEngine(); };
+$('segFields').onclick = () => { $('segFields').classList.add('on'); $('segRide').classList.remove('on'); $('segFields').setAttribute('aria-selected', 'true'); $('segRide').setAttribute('aria-selected', 'false'); $('engRide').hidden = true; $('engFields').hidden = false; renderEngine(); };
+$('showNotFitted').onchange = renderEngine;
+$('btnRecord').onclick = () => { toggleRecord().catch((e) => status('Capture failed: ' + e.message, 'bad')); };
+$('ccuLinkOn').onchange = (e) => { if (!linked()) return; sendLine(ccuLinkLine(e.target.checked)).then(() => sendLine({ type: 'ccuQuery' }, true)).catch(() => {}); };
+$('demoOn').onchange = (e) => setDemo(e.target.checked);
+$('btnCcuIdShow').onclick = () => { const i = $('ccuId'); i.type = i.type === 'password' ? 'text' : 'password'; $('btnCcuIdShow').textContent = i.type === 'password' ? 'Show' : 'Hide'; };
+$('btnCcuIdSave').onclick = () => {
+  const v = $('ccuId').value.trim().toLowerCase();
+  if (!validPhoneId(v)) { $('ccuIdMsg').textContent = 'The phone ID is 32 characters, 0–9 and a–f.'; return; }
+  if (!linked()) { $('ccuIdMsg').textContent = 'Connect the cluster first.'; return; }
+  sendLine(ccuConfigLine(v), true).then(() => { $('ccuId').value = ''; $('ccuIdMsg').textContent = 'Sent. Waiting for the cluster…'; }).catch((e) => { $('ccuIdMsg').textContent = 'Not sent: ' + e.message; });
+};
+$('btnCcuIdErase').onclick = () => confirmBox('Erase the phone ID from the cluster? The cluster can no longer log in to the CCU until you send it again.', 'Erase', () => {
+  if (linked()) sendLine(ccuConfigLine(''), true).catch(() => {});
+});
+// the stand-in cluster in tests feeds lines here (only with ?test in the address)
+if (/[?&]test\b/.test(location.search)) {
+  const sent = [], dec = new TextDecoder();
+  window.__esp28 = { onLine, sent,
+    // a stand-in link: what the app writes is collected as text lines in sent[]
+    fakeLink() { let buf = ''; link.dev = { gatt: { connected: true, disconnect() {} } }; link.authed = true;
+      link.rx = { writeValueWithResponse: async (c) => { buf += dec.decode(c); let i; while ((i = buf.indexOf('\n')) >= 0) { sent.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); } } };
+      onLinked(); } };
+}
+
 $('ver').textContent = 'Web version ' + VERSION;
+{ let t = 'engine'; try { t = JSON.parse(localStorage.getItem('esp28.tab')) || 'engine'; } catch (_) {} showTab(['engine', 'map', 'bike', 'more'].includes(t) ? t : 'engine'); }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (!navigator.bluetooth) status('No Bluetooth in this browser. Open this page in Bluefy.', 'bad');
 if (navigator.geolocation) startWatch();
