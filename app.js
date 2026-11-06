@@ -1,5 +1,5 @@
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler,
-  chunks, locationLine, routeLine, FIELD_MASK } from './core.js';
+  chunks, locationLine, osrmRouteLine } from './core.js';
 
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
@@ -193,86 +193,70 @@ function stopGps(tell = true) {
   render();
 }
 
-// ---------- Google: places and routes ----------
-const key = () => localStorage.getItem('gkey') || '';
-let session = crypto.randomUUID();
+// ---------- OpenStreetMap: Nominatim search and OSRM routes (free, no key) ----------
 let picked = null;   // {name, lat, lon}
-let routes = [];     // Google routes
 let here = null;
-
-async function gfetch(url, body, mask) {
-  const r = await fetch(url, { method: body ? 'POST' : 'GET',
-    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key(), ...(mask ? { 'X-Goog-FieldMask': mask } : {}) },
-    body: body ? JSON.stringify(body) : undefined });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((j.error && j.error.message) || `HTTP ${r.status}`);
-  return j;
-}
 
 function myPosition() {
   return new Promise((res, rej) => navigator.geolocation.getCurrentPosition(
-    (p) => res({ lat: p.coords.latitude, lon: p.coords.longitude, heading: p.coords.heading }), rej,
+    (p) => res({ lat: p.coords.latitude, lon: p.coords.longitude }), rej,
     { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }));
 }
 
-let searchT;
-async function search(q) {
-  if (!key()) { status('Add your Google key in Settings first.', 'bad'); return; }
-  const body = { input: q, sessionToken: session, languageCode: 'en', includedRegionCodes: ['id'] };
-  if (here) body.locationBias = { circle: { center: { latitude: here.lat, longitude: here.lon }, radius: 30000 } };
+async function search() {
+  const q = $('q').value.trim();
+  if (q.length < 3) return;
+  status('Searching…');
+  const u = new URL('https://nominatim.openstreetmap.org/search');
+  u.search = new URLSearchParams({ q, format: 'jsonv2', limit: '6', countrycodes: 'id', 'accept-language': 'en' });
+  if (here) u.searchParams.set('viewbox', `${here.lon - 0.5},${here.lat + 0.5},${here.lon + 0.5},${here.lat - 0.5}`);
   try {
-    const j = await gfetch('https://places.googleapis.com/v1/places:autocomplete', body);
+    const r = await fetch(u);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const list = $('results');
     list.innerHTML = '';
-    for (const s of (j.suggestions || []).filter((s) => s.placePrediction).slice(0, 6)) {
-      const p = s.placePrediction;
+    const found = await r.json();
+    for (const p of found) {
       const b = document.createElement('button');
       b.className = 'result';
-      b.innerHTML = `<b></b><span></span>`;
-      b.querySelector('b').textContent = p.structuredFormat ? p.structuredFormat.mainText.text : p.text.text;
-      b.querySelector('span').textContent = p.structuredFormat && p.structuredFormat.secondaryText ? p.structuredFormat.secondaryText.text : '';
-      b.onclick = () => pick(p.placeId, b.querySelector('b').textContent);
+      b.innerHTML = '<b></b><span></span>';
+      const name = p.name || p.display_name.split(',')[0];
+      b.querySelector('b').textContent = name;
+      b.querySelector('span').textContent = p.display_name;
+      b.onclick = () => { list.innerHTML = ''; picked = { name, lat: +p.lat, lon: +p.lon }; $('q').value = name; previewRoutes(); };
       list.appendChild(b);
     }
-  } catch (e) { status('Search failed: ' + e.message, 'bad'); log('Places: ' + e.message); }
+    status(found.length ? 'Pick a place' : 'Nothing found', found.length ? '' : 'bad');
+  } catch (e) { status('Search failed: ' + e.message, 'bad'); log('Search: ' + e.message); }
 }
 
-async function pick(id, name) {
-  $('results').innerHTML = '';
-  try {
-    const p = await fetch(`https://places.googleapis.com/v1/places/${id}?sessionToken=${session}`, {
-      headers: { 'X-Goog-Api-Key': key(), 'X-Goog-FieldMask': 'displayName,location' } }).then((r) => r.json());
-    session = crypto.randomUUID();
-    if (!p.location) throw new Error((p.error && p.error.message) || 'no location');
-    picked = { name: (p.displayName && p.displayName.text) || name, lat: p.location.latitude, lon: p.location.longitude };
-    $('q').value = picked.name;
-    await previewRoutes();
-  } catch (e) { status('Place failed: ' + e.message, 'bad'); }
+async function osrm(from, to, exclude) {
+  const u = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}` +
+    `?overview=full&geometries=geojson&steps=true&alternatives=true${exclude ? '&exclude=toll' : ''}`;
+  const r = await fetch(u);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.code !== 'Ok') throw new Error(j.message || j.code || `HTTP ${r.status}`);
+  return j.routes || [];
 }
 
 async function previewRoutes() {
   status('Planning the route…');
   try {
     here = await myPosition();
-    const origin = { location: { latLng: { latitude: here.lat, longitude: here.lon } } };
-    if (Number.isFinite(here.heading)) origin.location.heading = Math.round(here.heading);
-    const j = await gfetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-      origin, destination: { location: { latLng: { latitude: picked.lat, longitude: picked.lon } } },
-      travelMode: $('mode').value, routingPreference: 'TRAFFIC_AWARE', computeAlternativeRoutes: true,
-      languageCode: 'en', units: 'METRIC' }, FIELD_MASK);
-    routes = j.routes || [];
+    let routes;
+    try { routes = await osrm(here, picked, true); }
+    catch (e) { log('Route without tolls failed (' + e.message + '), trying without the toll rule'); routes = await osrm(here, picked, false); }
     const box = $('routes');
     box.innerHTML = '';
     routes.forEach((r, i) => {
       const b = document.createElement('button');
       b.className = 'result';
-      const min = Math.round(parseFloat(r.duration) / 60);
-      b.innerHTML = `<b>Route ${i + 1}: ${min} min</b><span>${(r.distanceMeters / 1000).toFixed(1)} km. Tap to send to the cluster</span>`;
-      b.onclick = () => sendRoute(routeLine(r, picked));
+      b.innerHTML = `<b>Route ${i + 1}: ${Math.round(r.duration / 60)} min</b><span>${(r.distance / 1000).toFixed(1)} km, no traffic data. Tap to send to the cluster</span>`;
+      b.onclick = () => sendRoute(osrmRouteLine(r, picked));
       box.appendChild(b);
     });
     status(routes.length ? 'Pick a route' : 'No route found', routes.length ? '' : 'bad');
-  } catch (e) { status('Route failed: ' + e.message, 'bad'); log('Routes: ' + e.message); }
+  } catch (e) { status('Route failed: ' + e.message, 'bad'); log('Route: ' + e.message); }
 }
 
 async function sendRoute(line) {
@@ -295,7 +279,6 @@ async function render() {
   $('btnGps').textContent = gps.watch !== null ? 'Stop sharing GPS' : 'Share GPS';
   $('btnGps').disabled = !link.authed;
   $('btnStop').disabled = !link.authed;
-  $('gkey').value = key();
 }
 
 $('btnRegister').onclick = () => connect(true);
@@ -303,8 +286,8 @@ $('btnConnect').onclick = () => connect(false);
 $('btnDisconnect').onclick = () => { stopGps(); link.dev.gatt.disconnect(); };
 $('btnGps').onclick = () => (gps.watch !== null ? stopGps() : startGps());
 $('btnStop').onclick = () => { sendLine({ type: 'stop' }).then(() => status('Navigation stopped', 'ok')); };
-$('q').oninput = (e) => { clearTimeout(searchT); const v = e.target.value.trim(); if (v.length > 2) searchT = setTimeout(() => search(v), 350); };
-$('gkey').onchange = (e) => { localStorage.setItem('gkey', e.target.value.trim()); log('Google key saved'); };
+$('btnSearch').onclick = search;
+$('q').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); search(); } };
 $('btnForget').onclick = async () => { await kv('bikePub', null); await kv('phoneKey', null); log('Pairing data erased'); render(); };
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible' && gps.watch !== null && !gps.lock) {

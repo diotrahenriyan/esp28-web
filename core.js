@@ -106,6 +106,37 @@ export function routeLine(g, dest) {
   return o;
 }
 
+// ---- OpenStreetMap: OSRM route (Mapbox v5 steps, geometries=geojson) -> the cluster's "route" ----
+const word = (m) => (m ? m.replace('uturn', 'U-turn').replace(/^slight (\w+)/, 'slightly $1') : '');
+function instruction(type, mod, name) {
+  const onto = name ? ` onto ${name}` : '';
+  switch (type) {
+    case 'depart': return `Head out${name ? ` on ${name}` : ''}`;
+    case 'arrive': return 'Arrive at your destination';
+    case 'turn': case 'end of road': return mod === 'uturn' ? 'Make a U-turn' : `Turn ${word(mod)}${onto}`;
+    case 'roundabout': case 'rotary': case 'roundabout turn': return `Take the roundabout${onto}`;
+    case 'fork': return `Keep ${word(mod)}${onto}`;
+    case 'merge': return `Merge${onto}`;
+    case 'on ramp': return `Take the ramp${onto}`;
+    case 'off ramp': return `Take the exit${onto}`;
+    default: return `Continue${onto}`;
+  }
+}
+export function osrmRouteLine(r, dest) {
+  const steps = (r.legs || []).flatMap((l) => l.steps || []).map((s) => {
+    const m = s.maneuver;
+    const o = { type: m.type, location: [r5(m.location[0]), r5(m.location[1])],
+      instruction: instruction(m.type, m.modifier, s.name).slice(0, 120) };
+    if (m.modifier) o.modifier = m.modifier;
+    const st = { maneuver: o, name: (s.name || '').slice(0, 60), distance: s.distance || 0, duration: s.duration || 0 };
+    if (s.driving_side) st.driving_side = s.driving_side;
+    return st;
+  });
+  return { type: 'route', name: (dest.name || 'Destination').slice(0, 60), latitude: dest.lat, longitude: dest.lon,
+    distanceMeters: r.distance || 0, durationSeconds: r.duration || 0, simulation: false, exclusions: 'toll',
+    geometry: { type: 'LineString', coordinates: r.geometry.coordinates.map(([x, y]) => [r5(x), r5(y)]) }, steps };
+}
+
 export const FIELD_MASK = [
   'routes.distanceMeters', 'routes.duration', 'routes.polyline.encodedPolyline',
   'routes.legs.steps.distanceMeters', 'routes.legs.steps.staticDuration',
