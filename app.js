@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.4';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.5';
 
-const VERSION = '2.8-w0.5.4';
+const VERSION = '2.8-w0.5.5';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -249,7 +249,35 @@ function meter(sku) {
   u[sku] = (u[sku] || 0) + 1;
   store.set('usage', u);
 }
+// Free usage per month and SKU (Google Maps Platform pricing page, updated 2026-11-02): map loads
+// (Dynamic Maps) 10,000; car route with traffic (Compute Routes Pro) 5,000; motorbike route (Compute
+// Routes Enterprise, two-wheel) 1,000; autocomplete requests 10,000; place details asking only for
+// location (Place Details Essentials) 10,000.
 const FREE = { map: 10000, routeCar: 5000, routeMoto: 1000, autocomplete: 10000, details: 10000 };
+// Hard stop on this phone: Google's daily quotas cannot be changed on this account, so the app stops
+// calling Google for a SKU at 90 % of its free amount this month and uses OpenStreetMap instead.
+// The 10 % margin covers Google's billing month (Pacific time) against this count (UTC month).
+const CAP_SHARE = 0.9;
+const LABEL = { map: 'map loads', routeCar: 'car routes', routeMoto: 'motorbike routes', autocomplete: 'search suggestions', details: 'place details' };
+const capOf = (sku) => Math.floor(FREE[sku] * CAP_SHARE);
+function used(sku) {
+  const u = store.get('usage', {});
+  return u.month === new Date().toISOString().slice(0, 7) ? (u[sku] || 0) : 0;
+}
+const capLogged = {};
+// true: use Google for this SKU now. false: no key, or this month's limit reached (logged once).
+function useGoogle(sku, quiet = false) {
+  if (!gkey()) return false;
+  if (used(sku) < capOf(sku)) return true;
+  if (!quiet && !capLogged[sku]) {
+    capLogged[sku] = true;
+    log(`Google ${LABEL[sku]}: ${used(sku)} this month, limit ${capOf(sku)} (90% of ${FREE[sku]} free). Using OpenStreetMap until next month.`);
+    status(`Google free limit for ${LABEL[sku]} reached this month: using OpenStreetMap.`, 'warn');
+  }
+  return false;
+}
+const routeSku = () => (ropt().mode === 'DRIVE' ? 'routeCar' : 'routeMoto');
+let routeProvider = 'osm';
 
 // a route choice, the same shape for both providers
 function fromOsrm(r) { return { coords: r.geometry.coordinates, duration: r.duration, distance: r.distance, toll: usesToll(r), toLine: (d) => osrmRouteLine(r, d) }; }
@@ -282,7 +310,8 @@ async function googleRoutes(from, to, alternatives = true) {
   return j.routes || [];
 }
 async function planRoutes(from, to, alternatives = true) {
-  if (gkey()) return (await googleRoutes(from, to, alternatives)).map(fromGoogle);
+  if (useGoogle(routeSku())) { routeProvider = 'google'; return (await googleRoutes(from, to, alternatives)).map(fromGoogle); }
+  routeProvider = 'osm';
   return (await osrm(from, to)).map(fromOsrm).sort((a, b) => a.toll - b.toll);
 }
 
@@ -467,7 +496,7 @@ function wireMap() {
     : 'Map, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.';
 }
 async function startMap() {
-  if (gkey()) {
+  if (useGoogle('map')) {
     googleTried = true;
     log('Google map: loading for ' + location.origin);
     gmFail = (reason) => { if (googleFailed) return; googleFailed = reason; if (M && M.kind === 'google') useOsm(reason); };
@@ -500,7 +529,7 @@ async function keepRoute() {
   const now = Date.now();
   let kind = null;
   if (detector.offer(distanceToLine(f.lat, f.lon, line), f.acc, now)) kind = 'reroute';
-  else if (gkey() && trip.refreshes < 6 && now - trip.lastRefresh >= 600000 && toDest > 3000) { kind = 'refresh'; trip.refreshes++; trip.lastRefresh = now; }
+  else if (useGoogle(routeSku(), true) && trip.refreshes < 6 && now - trip.lastRefresh >= 600000 && toDest > 3000) { kind = 'refresh'; trip.refreshes++; trip.lastRefresh = now; }
   if (!kind) return;
   rerouting = true;
   try {
@@ -534,7 +563,7 @@ async function search(submitted = true) {
   const list = $('results');
   const c = M ? M.center() : { lat: -6.9147, lon: 107.6098 };
   try {
-    if (gkey()) {
+    if (useGoogle('autocomplete') && useGoogle('details')) {
       meter('autocomplete');
       const r = await fetch('https://places.googleapis.com/v1/places:autocomplete', { method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': gkey() },
@@ -569,11 +598,11 @@ async function pickGoogle(id, name) {
   try {
     meter('details');
     const r = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(id)}?sessionToken=${session}`, {
-      headers: { 'X-Goog-Api-Key': gkey(), 'X-Goog-FieldMask': 'displayName,location' } });
+      headers: { 'X-Goog-Api-Key': gkey(), 'X-Goog-FieldMask': 'location' } });   // location only: Place Details Essentials
     const p = await r.json().catch(() => ({}));
     session = crypto.randomUUID();
     if (!r.ok || !p.location) throw new Error((p.error && p.error.message) || 'no location');
-    setDestination({ name: (p.displayName && p.displayName.text) || name, lat: p.location.latitude, lon: p.location.longitude });
+    setDestination({ name, lat: p.location.latitude, lon: p.location.longitude });
   } catch (e) { status('Place failed: ' + e.message, 'bad'); }
 }
 function resultButton(title, sub, onclick) {
@@ -608,7 +637,7 @@ async function setDestination(d) {
     nav.sel = 0;
     if (!nav.choices.length) { $('destInfo').textContent = 'No route found'; return; }
     const o = ropt();
-    $('destInfo').textContent = gkey() ? `Google · ${o.mode === 'DRIVE' ? 'car' : 'motorbike'} · live traffic${o.tolls ? ' · no tolls' : ''}`
+    $('destInfo').textContent = routeProvider === 'google' ? `Google · ${o.mode === 'DRIVE' ? 'car' : 'motorbike'} · live traffic${o.tolls ? ' · no tolls' : ''}`
       : (nav.choices.every((c) => c.toll) ? 'Every route found uses a toll road' : 'No live traffic: times assume empty roads');
     renderChoices();
     M.fit(nav.choices[0].coords);
@@ -658,11 +687,12 @@ function renderGoogle() {
   $('gkey').value = gkey();
   const o = ropt();
   $('optMode').value = o.mode; $('optTolls').checked = o.tolls; $('optHighways').checked = o.highways; $('optFerries').checked = o.ferries;
-  const u = store.get('usage', {});
-  const row = (k, label) => `${label}: ${u[k] || 0} of ${FREE[k].toLocaleString('en')} free`;
+  const row = (k, label) => `${label}: ${used(k)} of ${FREE[k].toLocaleString('en')} free · stops at ${capOf(k).toLocaleString('en')}`;
   $('usage').textContent = [row('map', 'Map loads'), row('routeMoto', 'Motorbike routes'), row('routeCar', 'Car routes'),
     row('autocomplete', 'Search suggestions'), row('details', 'Place details')].join('\n');
+  const capped = Object.keys(FREE).filter((k) => !useGoogle(k, true));
   $('googleState').textContent = !gkey() ? 'No key: the app uses free OpenStreetMap.'
+    : capped.length ? `Monthly limit reached for ${capped.map((k) => LABEL[k]).join(', ')}: those use OpenStreetMap until next month.`
     : M && M.kind === 'google' ? 'Google is on: map, search and routes.'
     : googleTried ? `The Google map did not load${googleFailed ? ': ' + googleFailed : ''}. Search and routes still use Google.`
     : 'Key saved. Tap Reload to apply.';
@@ -916,7 +946,7 @@ async function render() {
 $('btnMenu').onclick = () => openPage('pgSettings');
 $('btnMe').onclick = () => { if (gps.fix && M) M.view(gps.fix.lat, gps.fix.lon, 16); };
 $('q').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(searchT); search(true); } };
-$('q').oninput = () => { clearTimeout(searchT); if (gkey()) searchT = setTimeout(() => search(false), 400); };
+$('q').oninput = () => { clearTimeout(searchT); if (useGoogle('autocomplete', true) && useGoogle('details', true)) searchT = setTimeout(() => search(false), 400); };
 $('gkey').onchange = (e) => { store.set('gkey', e.target.value.trim()); renderGoogle(); };
 $('btnReload').onclick = () => location.reload();
 $('btnTestKey').onclick = () => { testKey(); };
