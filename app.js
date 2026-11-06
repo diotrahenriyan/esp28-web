@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js';
 
-const VERSION = '2.8-w0.4.0';
+const VERSION = '2.8-w0.5.0';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -238,81 +238,236 @@ document.addEventListener('visibilitychange', async () => {
   }
 });
 
-// TripRouteKeeper (free router): arrival at 100 m, reroute when off the route
+// ---------- providers: Google when a key is set (like the Android app), else free OpenStreetMap ----------
+const gkey = () => (store.get('gkey', '') || '').trim();
+const ropt = () => ({ mode: 'TWO_WHEELER', tolls: true, highways: false, ferries: false, ...store.get('routeOptions', {}) });
+// GoogleUsageMeter: requests per calendar month on this phone (an estimate, not Google billing)
+function meter(sku) {
+  const m = new Date().toISOString().slice(0, 7);
+  const u = store.get('usage', {});
+  if (u.month !== m) { for (const k of Object.keys(u)) delete u[k]; u.month = m; }
+  u[sku] = (u[sku] || 0) + 1;
+  store.set('usage', u);
+}
+const FREE = { map: 10000, routeCar: 5000, routeMoto: 1000, autocomplete: 10000, details: 10000 };
+
+// a route choice, the same shape for both providers
+function fromOsrm(r) { return { coords: r.geometry.coordinates, duration: r.duration, distance: r.distance, toll: usesToll(r), toLine: (d) => osrmRouteLine(r, d) }; }
+function fromGoogle(g) {
+  const coords = decodePolyline(g.polyline.encodedPolyline);
+  return { coords, duration: parseFloat(g.duration) || 0, distance: g.distanceMeters || 0, toll: false, toLine: (d) => routeLine(g, d) };
+}
+
+async function osrm(from, to) {
+  const u = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}` +
+    '?overview=full&geometries=geojson&steps=true&alternatives=3';
+  const r = await fetch(u);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.code !== 'Ok') throw new Error(j.message || j.code || `HTTP ${r.status}`);
+  return j.routes || [];
+}
+async function googleRoutes(from, to, alternatives = true) {
+  const o = ropt();
+  const origin = { location: { latLng: { latitude: from.lat, longitude: from.lon } } };
+  if (Number.isFinite(from.heading) && (from.speed || 0) >= 2) origin.location.heading = Math.round(from.heading);
+  meter(o.mode === 'DRIVE' ? 'routeCar' : 'routeMoto');
+  const r = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': gkey(), 'X-Goog-FieldMask': FIELD_MASK },
+    body: JSON.stringify({ origin, destination: { location: { latLng: { latitude: to.lat, longitude: to.lon } } },
+      travelMode: o.mode, routingPreference: 'TRAFFIC_AWARE', computeAlternativeRoutes: alternatives,
+      routeModifiers: { avoidTolls: o.tolls, avoidHighways: o.highways, avoidFerries: o.ferries },
+      languageCode: 'en', units: 'METRIC' }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || `HTTP ${r.status}`);
+  return j.routes || [];
+}
+async function planRoutes(from, to, alternatives = true) {
+  if (gkey()) return (await googleRoutes(from, to, alternatives)).map(fromGoogle);
+  return (await osrm(from, to)).map(fromOsrm).sort((a, b) => a.toll - b.toll);
+}
+
+// ---------- map: one interface, Google Maps or Leaflet + OpenStreetMap ----------
+let M = null;
+let followed = false;
+const sheetPad = () => document.querySelector('.sheet').offsetHeight + 20;
+function leafletMap() {
+  const map = L.map('map', { zoomControl: false }).setView([-6.9147, 107.6098], 13);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19,
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' }).addTo(map);
+  let me = null, dest = null, lines = [];
+  return {
+    kind: 'osm',
+    view(lat, lon, z) { map.setView([lat, lon], z); },
+    center() { const c = map.getCenter(); return { lat: c.lat, lon: c.lng }; },
+    me(lat, lon) { if (!me) me = L.marker([lat, lon], { icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [22, 22] }), interactive: false }).addTo(map); else me.setLatLng([lat, lon]); },
+    dest(p) { if (dest) dest.remove(); dest = p ? L.marker([p.lat, p.lon]).addTo(map) : null; },
+    routes(list, sel, onPick) {
+      lines.forEach((l) => l.remove()); lines = [];
+      list.forEach((c, i) => { if (i !== sel) lines.push(L.polyline(c.coords.map(([x, y]) => [y, x]), { color: '#8a93a3', weight: 5, opacity: 0.7 }).on('click', () => onPick(i)).addTo(map)); });
+      if (list[sel]) lines.push(L.polyline(list[sel].coords.map(([x, y]) => [y, x]), { color: list[sel].toll ? '#ff6b6b' : '#4c8dff', weight: 7 }).addTo(map));
+    },
+    fit(coords) { map.fitBounds(L.polyline(coords.map(([x, y]) => [y, x])).getBounds(), { paddingTopLeft: [30, 90], paddingBottomRight: [30, sheetPad()] }); },
+    onHold(cb) { map.on('contextmenu', (e) => cb(e.latlng.lat, e.latlng.lng)); },
+  };
+}
+function loadGoogle(key) {
+  return new Promise((res, rej) => {
+    window.gm_authFailure = () => rej(new Error('Google rejected the key for maps (enable "Maps JavaScript API" for it)'));
+    window.__gmReady = res;
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&v=weekly&loading=async&callback=__gmReady`;
+    s.onerror = () => rej(new Error('Google Maps did not load'));
+    document.head.appendChild(s);
+    setTimeout(() => rej(new Error('Google Maps did not load in 15 s')), 15000);
+  });
+}
+async function googleMap() {
+  await loadGoogle(gkey());
+  meter('map');
+  const { Map, Polyline } = await google.maps.importLibrary('maps');
+  const { Marker } = await google.maps.importLibrary('marker');
+  const el = $('map');
+  const map = new Map(el, { center: { lat: -6.9147, lng: 107.6098 }, zoom: 13, disableDefaultUI: true, clickableIcons: false, gestureHandling: 'greedy' });
+  let me = null, dest = null, lines = [], holdT = null;
+  const path = (c) => c.map(([x, y]) => ({ lat: y, lng: x }));
+  return {
+    kind: 'google',
+    view(lat, lon, z) { map.setCenter({ lat, lng: lon }); map.setZoom(z); },
+    center() { const c = map.getCenter(); return { lat: c.lat(), lon: c.lng() }; },
+    me(lat, lon) {
+      if (!me) me = new Marker({ map, position: { lat, lng: lon }, clickable: false,
+        icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#4c8dff', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 3 } });
+      else me.setPosition({ lat, lng: lon });
+    },
+    dest(p) { if (dest) dest.setMap(null); dest = p ? new Marker({ map, position: { lat: p.lat, lng: p.lon } }) : null; },
+    routes(list, sel, onPick) {
+      lines.forEach((l) => l.setMap(null)); lines = [];
+      list.forEach((c, i) => { if (i !== sel) { const l = new Polyline({ map, path: path(c.coords), strokeColor: '#8a93a3', strokeWeight: 5, strokeOpacity: 0.7 }); l.addListener('click', () => onPick(i)); lines.push(l); } });
+      if (list[sel]) lines.push(new Polyline({ map, path: path(list[sel].coords), strokeColor: list[sel].toll ? '#ff6b6b' : '#4c8dff', strokeWeight: 7, zIndex: 2 }));
+    },
+    fit(coords) {
+      const b = new google.maps.LatLngBounds();
+      coords.forEach(([x, y]) => b.extend({ lat: y, lng: x }));
+      map.fitBounds(b, { top: 90, left: 30, right: 30, bottom: sheetPad() });
+    },
+    onHold(cb) {
+      // a long press (600 ms without moving) picks a spot; right click on a computer
+      map.addListener('contextmenu', (e) => cb(e.latLng.lat(), e.latLng.lng()));
+      map.addListener('mousedown', (e) => { clearTimeout(holdT); holdT = setTimeout(() => cb(e.latLng.lat(), e.latLng.lng()), 600); });
+      ['mouseup', 'dragstart', 'zoom_changed'].forEach((ev) => map.addListener(ev, () => clearTimeout(holdT)));
+    },
+  };
+}
+let googleTried = false;
+async function startMap() {
+  if (gkey()) {
+    googleTried = true;
+    try { M = await googleMap(); log('Map: Google'); }
+    catch (e) { log('Google map failed: ' + e.message); status(e.message + '. Using OpenStreetMap.', 'warn'); $('map').innerHTML = ''; }
+  }
+  if (!M) { M = leafletMap(); log('Map: OpenStreetMap'); }
+  M.onHold((lat, lon) => setDestination({ name: 'Dropped pin', lat, lon }));
+  if (gps.fix) drawMe();
+  $('mapAttrib').textContent = M.kind === 'google' ? 'Map, search and routes: Google. Live traffic on motorbike and car routes.'
+    : 'Map, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.';
+}
+function drawMe() {
+  const f = gps.fix;
+  if (!f || !M) return;
+  M.me(f.lat, f.lon);
+  if (!followed) { followed = true; M.view(f.lat, f.lon, 15); }
+}
+function drawRoutes(list, sel) { if (M) M.routes(list, sel, selectRoute); }
+
+// ---------- TripRouteKeeper: arrival at 100 m, reroute when off the route, traffic refresh (Google) ----------
+const trip = { refreshes: 0, lastRefresh: 0, sentAt: 0 };
 async function keepRoute() {
   const f = gps.fix;
   if (!nav.active || rerouting || !f) return;
   const line = nav.active.geometry.coordinates;
   const end = line[line.length - 1];
-  if (metersBetween(f.lat, f.lon, nav.active.latitude, nav.active.longitude) < 100 ||
-      metersBetween(f.lat, f.lon, end[1], end[0]) < 100) {
+  const toDest = metersBetween(f.lat, f.lon, nav.active.latitude, nav.active.longitude);
+  if (toDest < 100 || metersBetween(f.lat, f.lon, end[1], end[0]) < 100) {
     nav.active = null; status('Arrived · route updates off', 'ok'); return;
   }
-  if (!detector.offer(distanceToLine(f.lat, f.lon, line), f.acc, Date.now())) return;
+  const now = Date.now();
+  let kind = null;
+  if (detector.offer(distanceToLine(f.lat, f.lon, line), f.acc, now)) kind = 'reroute';
+  else if (gkey() && trip.refreshes < 6 && now - trip.lastRefresh >= 600000 && toDest > 3000) { kind = 'refresh'; trip.refreshes++; trip.lastRefresh = now; }
+  if (!kind) return;
   rerouting = true;
   try {
-    const rs = await osrm({ lat: f.lat, lon: f.lon }, nav.dest);
-    const pick = rs.find((r) => !usesToll(r)) || rs[0];
+    const rs = await planRoutes(f, nav.dest, false);
+    const pick = rs.find((c) => !c.toll) || rs[0];
     if (!pick || !nav.active) return;
-    const l = await withRouteId(osrmRouteLine(pick, nav.dest));
-    nav.active = l; nav.line = l; store.set('route', l);
+    if (kind === 'refresh') {
+      // TrafficRefreshPolicy: send only when the ETA moved by 2 minutes or 10 %
+      const expected = Math.max(0, nav.active.durationSeconds - (now - trip.sentAt) / 1000);
+      if (Math.abs(pick.duration - expected) < Math.max(120, 0.1 * expected)) return;
+    }
+    const l = await withRouteId(pick.toLine(nav.dest));
+    nav.active = l; nav.line = l; store.set('route', l); trip.sentAt = Date.now();
     detector.routeReplaced(Date.now());
     await sendRouteLine(l);
-    drawRoutes([{ r: pick, toll: usesToll(pick) }], 0);
-    status(`Rerouted · ETA ${Math.ceil(pick.duration / 60)} min`, 'ok');
-  } catch (e) { status('Reroute failed: ' + e.message, 'bad'); }
+    drawRoutes([pick], 0);
+    status(`${kind === 'reroute' ? 'Rerouted' : 'Traffic ETA updated'} · ${Math.ceil(pick.duration / 60)} min`, 'ok');
+  } catch (e) { status(`${kind === 'reroute' ? 'Reroute' : 'Traffic update'} failed: ${e.message}`, 'bad'); }
   finally { rerouting = false; }
 }
 
-// ---------- map ----------
-const map = L.map('map', { zoomControl: false, attributionControl: true }).setView([-6.9147, 107.6098], 13);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19,
-  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' }).addTo(map);
-let meMarker = null, followed = false, destMarker = null, routeLayers = [];
-function drawMe() {
-  const f = gps.fix;
-  if (!f) return;
-  if (!meMarker) meMarker = L.marker([f.lat, f.lon], { icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [22, 22] }), interactive: false }).addTo(map);
-  else meMarker.setLatLng([f.lat, f.lon]);
-  if (!followed) { followed = true; map.setView([f.lat, f.lon], 15); }
-}
-function drawRoutes(list, sel) {
-  routeLayers.forEach((l) => l.remove());
-  routeLayers = [];
-  list.forEach(({ r }, i) => {
-    if (i === sel) return;
-    routeLayers.push(L.polyline(r.geometry.coordinates.map(([x, y]) => [y, x]), { color: '#8a93a3', weight: 5, opacity: 0.7 })
-      .on('click', () => selectRoute(i)).addTo(map));
-  });
-  const s = list[sel];
-  if (s) {
-    const pl = L.polyline(s.r.geometry.coordinates.map(([x, y]) => [y, x]), { color: s.toll ? '#ff6b6b' : '#4c8dff', weight: 7 }).addTo(map);
-    routeLayers.push(pl);
-  }
-}
-map.on('contextmenu', (e) => setDestination({ name: 'Dropped pin', lat: e.latlng.lat, lon: e.latlng.lng }));
-
 // ---------- destination, search and routes ----------
 const nav = { dest: null, choices: [], sel: 0, line: store.get('route', null), active: null };
+let session = crypto.randomUUID();
+let searchT = null;
 
-async function search() {
+async function search(submitted = true) {
   const q = $('q').value.trim();
   if (q.length < 3) return;
-  $('q').blur();
-  const u = new URL('https://nominatim.openstreetmap.org/search');
-  u.search = new URLSearchParams({ q, format: 'jsonv2', limit: '6', countrycodes: 'id', 'accept-language': 'en' });
-  const c = map.getCenter();
-  u.searchParams.set('viewbox', `${c.lng - 0.5},${c.lat + 0.5},${c.lng + 0.5},${c.lat - 0.5}`);
+  if (submitted) $('q').blur();
+  const list = $('results');
+  const c = M ? M.center() : { lat: -6.9147, lon: 107.6098 };
   try {
-    const found = await fetch(u).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
-    const list = $('results');
-    list.innerHTML = '';
-    if (!found.length) status('Nothing found', 'bad');
-    for (const p of found) {
-      const name = p.name || p.display_name.split(',')[0];
-      list.appendChild(resultButton(name, p.display_name, () => { list.innerHTML = ''; setDestination({ name, lat: +p.lat, lon: +p.lon }); }));
+    if (gkey()) {
+      meter('autocomplete');
+      const r = await fetch('https://places.googleapis.com/v1/places:autocomplete', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': gkey() },
+        body: JSON.stringify({ input: q, sessionToken: session, languageCode: 'en', includedRegionCodes: ['id'],
+          locationBias: { circle: { center: { latitude: c.lat, longitude: c.lon }, radius: 30000 } } }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((j.error && j.error.message) || `HTTP ${r.status}`);
+      list.innerHTML = '';
+      for (const s of (j.suggestions || []).filter((x) => x.placePrediction).slice(0, 6)) {
+        const p = s.placePrediction;
+        const main = p.structuredFormat ? p.structuredFormat.mainText.text : p.text.text;
+        const sub = p.structuredFormat && p.structuredFormat.secondaryText ? p.structuredFormat.secondaryText.text : '';
+        list.appendChild(resultButton(main, sub, () => pickGoogle(p.placeId, main)));
+      }
+    } else {
+      if (!submitted) return;   // Nominatim's rule: no search as you type
+      const u = new URL('https://nominatim.openstreetmap.org/search');
+      u.search = new URLSearchParams({ q, format: 'jsonv2', limit: '6', countrycodes: 'id', 'accept-language': 'en',
+        viewbox: `${c.lon - 0.5},${c.lat + 0.5},${c.lon + 0.5},${c.lat - 0.5}` });
+      const found = await fetch(u).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+      list.innerHTML = '';
+      if (!found.length) status('Nothing found', 'bad');
+      for (const p of found) {
+        const name = p.name || p.display_name.split(',')[0];
+        list.appendChild(resultButton(name, p.display_name, () => { list.innerHTML = ''; setDestination({ name, lat: +p.lat, lon: +p.lon }); }));
+      }
     }
   } catch (e) { status('Search failed: ' + e.message, 'bad'); }
+}
+async function pickGoogle(id, name) {
+  $('results').innerHTML = '';
+  try {
+    meter('details');
+    const r = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(id)}?sessionToken=${session}`, {
+      headers: { 'X-Goog-Api-Key': gkey(), 'X-Goog-FieldMask': 'displayName,location' } });
+    const p = await r.json().catch(() => ({}));
+    session = crypto.randomUUID();
+    if (!r.ok || !p.location) throw new Error((p.error && p.error.message) || 'no location');
+    setDestination({ name: (p.displayName && p.displayName.text) || name, lat: p.location.latitude, lon: p.location.longitude });
+  } catch (e) { status('Place failed: ' + e.message, 'bad'); }
 }
 function resultButton(title, sub, onclick) {
   const b = document.createElement('button');
@@ -324,24 +479,15 @@ function resultButton(title, sub, onclick) {
   return b;
 }
 
-async function osrm(from, to) {
-  const u = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}` +
-    '?overview=full&geometries=geojson&steps=true&alternatives=3';
-  const r = await fetch(u);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j.code !== 'Ok') throw new Error(j.message || j.code || `HTTP ${r.status}`);
-  return j.routes || [];
-}
-
 async function setDestination(d) {
   nav.dest = d;
+  nav.choices = [];
   $('q').value = d.name;
   $('destName').textContent = d.name;
   $('destInfo').textContent = 'Planning the route…';
   $('routes').innerHTML = '';
   $('destBox').hidden = false;
-  if (destMarker) destMarker.remove();
-  destMarker = L.marker([d.lat, d.lon]).addTo(map);
+  if (M) { M.dest(d); M.routes([], 0, selectRoute); }
   render();
   // a pending permission prompt never times out on its own: give up after 20 s
   const from = gps.fix || await new Promise((res) => {
@@ -351,23 +497,25 @@ async function setDestination(d) {
   });
   if (!from) { $('destInfo').textContent = 'Location unavailable: allow location for this page.'; return; }
   try {
-    nav.choices = (await osrm(from, d)).map((r) => ({ r, toll: usesToll(r) })).sort((a, b) => a.toll - b.toll);
+    nav.choices = await planRoutes(from, d);
     nav.sel = 0;
     if (!nav.choices.length) { $('destInfo').textContent = 'No route found'; return; }
-    $('destInfo').textContent = nav.choices.every((c) => c.toll) ? 'Every route found uses a toll road' : 'No live traffic: times assume empty roads';
+    const o = ropt();
+    $('destInfo').textContent = gkey() ? `Google · ${o.mode === 'DRIVE' ? 'car' : 'motorbike'} · live traffic${o.tolls ? ' · no tolls' : ''}`
+      : (nav.choices.every((c) => c.toll) ? 'Every route found uses a toll road' : 'No live traffic: times assume empty roads');
     renderChoices();
-    map.fitBounds(L.polyline(nav.choices[0].r.geometry.coordinates.map(([x, y]) => [y, x])).getBounds(), { paddingTopLeft: [30, 90], paddingBottomRight: [30, document.querySelector('.sheet').offsetHeight + 20] });
+    M.fit(nav.choices[0].coords);
   } catch (e) { $('destInfo').textContent = 'Route failed: ' + e.message; }
   render();
 }
 function renderChoices() {
   const box = $('routes');
   box.innerHTML = '';
-  nav.choices.forEach(({ r, toll }, i) => {
-    const b = resultButton(`Route ${i + 1}: ${Math.round(r.duration / 60)} min${toll ? '. Uses a toll road, not for motorbikes' : ''}`,
-      `${(r.distance / 1000).toFixed(1)} km`, () => selectRoute(i));
+  nav.choices.forEach((c, i) => {
+    const b = resultButton(`Route ${i + 1}: ${Math.round(c.duration / 60)} min${c.toll ? '. Uses a toll road, not for motorbikes' : ''}`,
+      `${(c.distance / 1000).toFixed(1)} km`, () => selectRoute(i));
     if (i === nav.sel) b.classList.add('sel');
-    if (toll) b.classList.add('toll');
+    if (c.toll) b.classList.add('toll');
     box.appendChild(b);
   });
   drawRoutes(nav.choices, nav.sel);
@@ -378,7 +526,7 @@ async function sendSelected(simulation) {
   if (!linked()) { status('Connect the cluster to send this route.', 'warn'); return; }
   const c = nav.choices[nav.sel];
   if (!c) return;
-  const line = osrmRouteLine(c.r, nav.dest);
+  const line = c.toLine(nav.dest);
   line.simulation = simulation;
   const l = await withRouteId(line);
   try {
@@ -387,6 +535,7 @@ async function sendSelected(simulation) {
     nav.line = l; store.set('route', l);
     nav.active = simulation ? null : l;
     detector.startTrip(Date.now());
+    Object.assign(trip, { refreshes: 0, lastRefresh: Date.now(), sentAt: Date.now() });
     status(simulation ? 'Simulation requested · send the route again to return to real GPS'
       : `Route sent · ${gps.sharing ? 'phone GPS sharing stays on' : 'phone GPS sharing stays off'}`, 'ok');
   } catch (e) { status('Could not send the route: ' + e.message, 'bad'); }
@@ -395,6 +544,21 @@ async function sendSelected(simulation) {
 async function sendRouteLine(l) {
   status('Sending the route…');
   await sendLine(l);
+}
+
+// ---------- Google settings: key (on this phone only), route options, usage ----------
+function renderGoogle() {
+  $('gkey').value = gkey();
+  const o = ropt();
+  $('optMode').value = o.mode; $('optTolls').checked = o.tolls; $('optHighways').checked = o.highways; $('optFerries').checked = o.ferries;
+  const u = store.get('usage', {});
+  const row = (k, label) => `${label}: ${u[k] || 0} of ${FREE[k].toLocaleString('en')} free`;
+  $('usage').textContent = [row('map', 'Map loads'), row('routeMoto', 'Motorbike routes'), row('routeCar', 'Car routes'),
+    row('autocomplete', 'Search suggestions'), row('details', 'Place details')].join('\n');
+  $('googleState').textContent = !gkey() ? 'No key: the app uses free OpenStreetMap.'
+    : M && M.kind === 'google' ? 'Google is on: map, search and routes.'
+    : googleTried ? 'The Google map did not load (see Log). Search and routes still use Google.'
+    : 'Key saved. Tap Reload to apply.';
 }
 
 // ---------- saved places (SavedDestination.kt: up to 50, names 1..80) ----------
@@ -579,7 +743,7 @@ function checkUpdated() {
 
 // ---------- pages, dialogs ----------
 const stack = [];
-function openPage(id) { $(id).hidden = false; stack.push(id); if (id === 'pgSaved') renderSaved(); if (id === 'pgDetails') renderDetails(); if (id === 'pgFirmware') renderFirmware(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance(); render(); }
+function openPage(id) { $(id).hidden = false; stack.push(id); if (id === 'pgSaved') renderSaved(); if (id === 'pgDetails') renderDetails(); if (id === 'pgFirmware') renderFirmware(); if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance(); render(); }
 function closePages() { while (stack.length) $(stack.pop()).hidden = true; }
 document.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => { const id = stack.pop(); if (id) $(id).hidden = true; }));
 document.querySelectorAll('[data-open]').forEach((b) => (b.onclick = () => openPage(b.dataset.open)));
@@ -643,8 +807,15 @@ async function render() {
 
 // ---------- wiring ----------
 $('btnMenu').onclick = () => openPage('pgSettings');
-$('btnMe').onclick = () => { if (gps.fix) map.setView([gps.fix.lat, gps.fix.lon], 16); };
-$('q').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); search(); } };
+$('btnMe').onclick = () => { if (gps.fix && M) M.view(gps.fix.lat, gps.fix.lon, 16); };
+$('q').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(searchT); search(true); } };
+$('q').oninput = () => { clearTimeout(searchT); if (gkey()) searchT = setTimeout(() => search(false), 400); };
+$('gkey').onchange = (e) => { store.set('gkey', e.target.value.trim()); renderGoogle(); };
+$('btnReload').onclick = () => location.reload();
+['optMode', 'optTolls', 'optHighways', 'optFerries'].forEach((id) => ($(id).onchange = () => {
+  store.set('routeOptions', { mode: $('optMode').value, tolls: $('optTolls').checked, highways: $('optHighways').checked, ferries: $('optFerries').checked });
+  if (nav.dest) setDestination(nav.dest);
+}));
 $('btnLink').onclick = async () => {
   if (link.dev && link.dev.gatt.connected) { if (gps.sharing) await setSharing(false); link.dev.gatt.disconnect(); return; }
   connect(false);
@@ -652,7 +823,7 @@ $('btnLink').onclick = async () => {
 $('btnGps').onclick = () => setSharing(!gps.sharing);
 $('btnSend').onclick = () => sendSelected(false);
 $('btnSave').onclick = saveCurrent;
-$('btnClear').onclick = () => { nav.dest = null; nav.choices = []; $('destBox').hidden = true; $('q').value = ''; drawRoutes([], 0); if (destMarker) destMarker.remove(); render(); };
+$('btnClear').onclick = () => { nav.dest = null; nav.choices = []; $('destBox').hidden = true; $('q').value = ''; if (M) { M.routes([], 0, selectRoute); M.dest(null); } render(); };
 $('btnStop').onclick = async () => {
   await sendLine({ type: 'stop' }).catch(() => {});
   nav.line = null; nav.active = null; store.set('route', null);
@@ -687,4 +858,5 @@ $('ver').textContent = 'Web version ' + VERSION;
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (!navigator.bluetooth) status('No Bluetooth in this browser. Open this page in Bluefy.', 'bad');
 if (navigator.geolocation) startWatch();
+startMap();
 render();

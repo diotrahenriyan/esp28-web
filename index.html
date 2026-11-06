@@ -93,12 +93,13 @@
     <button class="secondary" data-open="pgPairing">Cluster pairing</button>
     <button class="secondary" data-open="pgDetails">Bike details</button>
     <button class="secondary" data-open="pgFirmware">Firmware update</button>
+    <button class="secondary" data-open="pgGoogle">Google maps and route options</button>
     <button class="secondary" data-open="pgSaved">Saved places</button>
     <button class="secondary" data-open="pgAppearance">Map appearance</button>
     <button class="secondary" data-open="pgDebug">Diagnostics and simulation</button>
     <button class="secondary" data-open="pgLog">Log</button>
-    <div class="dim" style="margin-top:16px" id="ver">Web version 2.8-w0.4.0</div>
-    <div class="dim">Maps, search and routes: © OpenStreetMap contributors (tiles, Nominatim, OSRM). Free, no account. No live traffic. Routes that use a toll road are marked in red.</div>
+    <div class="dim" style="margin-top:16px" id="ver">Web version 2.8-w0.5.0</div>
+    <div class="dim" id="mapAttrib"></div>
   </div>
 
   <div class="page" id="pgPairing" hidden>
@@ -135,6 +136,28 @@
       <button id="btnFwCancel" class="danger">Cancel update</button>
     </div>
     <div class="dim">Keep the bike stopped, this page open and the screen on until it finishes. The cluster checks the image's signature and SHA-256 before switching; if anything fails it keeps the current firmware.</div>
+  </div>
+
+  <div class="page" id="pgGoogle" hidden>
+    <header><button class="iconbtn" data-back>‹</button><b>Google maps and route options</b></header>
+    <div class="card">
+      <div id="googleState" class="status"></div>
+      <input id="gkey" placeholder="Google API key (optional)" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin-top:10px">
+      <div class="dim">Stored on this iPhone only, never in the app's code. Leave empty for free OpenStreetMap. The key needs Maps JavaScript API, Places API (New) and Routes API enabled.</div>
+      <button id="btnReload" class="secondary">Reload to apply</button>
+    </div>
+    <div class="card">
+      <b>Route options (Google)</b>
+      <select id="optMode" style="margin-top:10px"><option value="TWO_WHEELER">Motorbike</option><option value="DRIVE">Car</option></select>
+      <label style="display:block;margin-top:12px"><input type="checkbox" id="optTolls" style="width:auto;height:auto"> Avoid tolls</label>
+      <label style="display:block;margin-top:8px"><input type="checkbox" id="optHighways" style="width:auto;height:auto"> Avoid motorways</label>
+      <label style="display:block;margin-top:8px"><input type="checkbox" id="optFerries" style="width:auto;height:auto"> Avoid ferries</label>
+    </div>
+    <div class="card">
+      <b>This month on this phone</b>
+      <pre id="usage"></pre>
+      <div class="dim">An estimate from this phone only, not Google's bill. Your quota caps in Google Cloud are the real limit.</div>
+    </div>
   </div>
 
   <div class="page" id="pgSaved" hidden>
