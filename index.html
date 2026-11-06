@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ESP 2.8 Companion</title>
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<style>
+  :root { --bg:#0f1115; --card:#191c22; --line:#2a2f38; --text:#eef1f5; --dim:#9aa3b2;
+          --accent:#4c8dff; --ok:#3fbf7f; --bad:#ff6b6b; --warn:#f2b84b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 -apple-system, system-ui, sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
+  button { width:100%; min-height:52px; border:0; border-radius:12px; font:600 17px -apple-system, system-ui, sans-serif;
+           background:var(--accent); color:#fff; margin-top:8px; }
+  button.secondary { background:#2a2f38; }
+  button.danger { background:#5a2328; color:#ffd6d6; }
+  button:disabled { opacity:.4; }
+  input, select { width:100%; min-height:48px; border-radius:10px; border:1px solid var(--line); background:#0f1115;
+          color:var(--text); font-size:17px; padding:0 12px; margin-top:8px; }
+  .status { padding:12px; border-radius:10px; background:#11141a; border:1px solid var(--line); }
+  .status.ok { border-color:var(--ok); color:#c8f2dc; }
+  .status.bad { border-color:var(--bad); color:#ffd0d0; }
+  .status.warn { border-color:var(--warn); color:#ffe7b8; }
+  .dim { color:var(--dim); font-size:14px; }
+  .result { background:#11141a; border:1px solid var(--line); text-align:left; padding:10px 12px; font-weight:400; }
+  .result b { display:block; font-size:16px; } .result span { color:var(--dim); font-size:14px; }
+  ol { margin:8px 0 0; padding-left:20px; color:var(--dim); font-size:14px; }
+  pre { white-space:pre-wrap; font-size:12px; color:var(--dim); max-height:240px; overflow:auto; margin:8px 0 0; }
+  details summary { color:var(--dim); font-size:14px; }
+</style>
+</head>
+<body>
+  <h1>ESP 2.8 Companion</h1>
+  <div class="dim" id="fw">Web version 2.8-w0.1.0</div>
+
+  <div class="card">
+    <h2>Cluster</h2>
+    <div id="status" class="status">Not connected</div>
+    <ol id="regHint">
+      <li>On the cluster, go to the phone page and hold BOOT to open registration (60 seconds).</li>
+      <li>Tap Register this iPhone and choose "ESP 2.8 Cluster".</li>
+      <li>Tap Pair on the iPhone, then confirm the same code on the cluster.</li>
+    </ol>
+    <button id="btnRegister">Register this iPhone</button>
+    <button id="btnConnect" hidden>Connect</button>
+    <button id="btnDisconnect" class="secondary" hidden>Disconnect</button>
+  </div>
+
+  <div class="card">
+    <h2>Share GPS</h2>
+    <div class="dim">Keep this page open and the screen on while riding. iOS stops GPS when the screen is off.</div>
+    <button id="btnGps" disabled>Share GPS</button>
+    <div class="dim" id="gpsInfo"></div>
+  </div>
+
+  <div class="card">
+    <h2>Destination</h2>
+    <input id="q" placeholder="Search a place" autocomplete="off">
+    <div id="results"></div>
+    <select id="mode"><option value="TWO_WHEELER">Motorbike</option><option value="DRIVE">Car</option></select>
+    <div id="routes"></div>
+    <button id="btnStop" class="danger" disabled>Stop navigation</button>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Settings and log</summary>
+      <input id="gkey" placeholder="Google API key" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="dim">Stored on this phone only.</div>
+      <button id="btnForget" class="secondary">Erase pairing data on this phone</button>
+      <pre id="log"></pre>
+    </details>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
