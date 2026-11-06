@@ -1,7 +1,7 @@
-// CCU decoder (ccu.js): node tests/ccu.test.mjs
+// Bike unit profiles (bikeunit.js), Yamaha Y-Connect decoder: node tests/bikeunit.test.mjs
 import assert from 'node:assert/strict';
-import { CcuFields, liveFrame, identityFrame, loginFrame, demoValues, DEMO_ID, checksum, withChecksum, LIVE_LEN,
-  captureLine, validPhoneId, N } from '../ccu.js';
+import { YamahaFields as CcuFields, liveFrame, identityFrame, loginFrame, demoValues, DEMO_ID, checksum, withChecksum, LIVE_LEN,
+  captureLine, N, PROFILES, DEFAULT_PROFILE, YAMAHA_YCONNECT, bikeConfigLine, bikeRelayLine } from '../bikeunit.js';
 
 let n = 0;
 const t = (name, f) => { f(); n++; console.log('PASS', name); };
@@ -49,5 +49,17 @@ t('groups: order, not-fitted hidden', () => {
   assert.ok(c.groups(false)[1][1].some((r) => r.status === N));
 });
 t('capture line format matches CCU Live', () => assert.equal(captureLine(1730900000123, 'abcd'), '1730900000.123 abcd\n'));
-t('phone ID check', () => { assert.ok(validPhoneId('0123456789abcdef0123456789abcdef')); assert.ok(!validPhoneId('XYZ')); assert.ok(!validPhoneId('0123456789ABCDEF0123456789ABCDEF')); });
+t('Yamaha login key check (phone ID)', () => { const k = YAMAHA_YCONNECT.key; assert.ok(k.valid('0123456789abcdef0123456789abcdef')); assert.ok(!k.valid('XYZ'));
+  assert.ok(k.valid(k.normalize(' 0123456789ABCDEF0123456789ABCDEF '))); });
+t('profile interface: every profile has the fields the app reads', () => {
+  for (const p of Object.values(PROFILES)) {
+    for (const k of ['id', 'name', 'key', 'frequent', 'live', 'bike', 'bikeRawGroups', 'create']) assert.ok(p[k] !== undefined, p.id + ' lacks ' + k);
+    const f = p.create(); for (const m of ['decode', 'get', 'groups', 'warning', 'clear']) assert.equal(typeof f[m], 'function');
+  }
+  assert.ok(PROFILES[DEFAULT_PROFILE]);
+});
+t('relay lines are generic (bike*) and carry the profile', () => {
+  assert.deepEqual(bikeConfigLine('yamaha-yconnect', 'abc'), { type: 'bikeConfig', profile: 'yamaha-yconnect', key: 'abc' });
+  assert.deepEqual(bikeRelayLine(1), { type: 'bikeRelay', on: true });
+});
 console.log(`all passed (${n})`);

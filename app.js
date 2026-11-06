@@ -4,8 +4,8 @@
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
   APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.6.0';
-import { CcuFields, CCU_STATES, ccuConfigLine, ccuLinkLine, ccuRelayLine, validPhoneId, captureLine, liveFrame, identityFrame, loginFrame,
-  demoValues, DEMO_ID, V as ST_V, P as ST_P, U as ST_U, X as ST_X, N as ST_N } from './ccu.js?v=2.8-w0.6.0';
+import { PROFILES, DEFAULT_PROFILE, UNIT_STATES, bikeConfigLine, bikeLinkLine, bikeRelayLine, bikeQueryLine, captureLine,
+  V as ST_V, P as ST_P, U as ST_U, X as ST_X, N as ST_N } from './bikeunit.js?v=2.8-w0.6.0';
 
 const VERSION = '2.8-w0.6.0';
 const $ = (id) => document.getElementById(id);
@@ -50,11 +50,12 @@ async function phoneKey() {
   }
   return k;
 }
+const NO_BT = 'This browser has no Bluetooth access. Use Chrome or Edge on a laptop, tablet or Android phone, or Bluefy on an iPhone.';
 const STATUS_HINT = {
-  'Phone not registered': 'The cluster does not know this phone. Register it again in Settings → Cluster pairing.',
-  'Registration closed': 'Registration is closed. On the cluster open the phone page and hold BOOT for 2 seconds, then try again.',
-  'Phone list full': 'The cluster already has the maximum of 3 phones.',
-  'Bad key': "The cluster rejected this phone's key.",
+  'Phone not registered': 'The cluster does not know this device. Register it again in Setup › Registration.',
+  'Registration closed': 'Registration is closed. On the cluster, open the phone page and hold BOOT for 2 seconds, then try again.',
+  'Phone list full': 'The cluster already has 3 registered devices, the maximum.',
+  'Bad key': "The cluster rejected this device's key.",
 };
 
 // ---------- BLE link ----------
@@ -80,7 +81,7 @@ function sendLine(obj, quiet = false) {
 const linked = () => link.authed && link.dev && link.dev.gatt.connected;
 
 async function connect(register) {
-  if (!navigator.bluetooth) { status('No Bluetooth in this browser. Open this page in Bluefy.', 'bad'); return; }
+  if (!navigator.bluetooth) { status(NO_BT, 'bad'); return; }
   if (!register && !(await kv('bikePub'))) { openPage('pgPairing'); return; }
   Object.assign(link, { register, authed: false, bikeNonce: null, awaitingRouteId: null });
   try {
@@ -100,15 +101,15 @@ async function connect(register) {
       asm.feed(new Uint8Array(e.target.value.buffer, e.target.value.byteOffset, e.target.value.byteLength)));
     await tx.startNotifications();
     log('Connected, notifications on');
-    status(register ? 'Pairing: tap Pair on the iPhone, then confirm the same code on the cluster.' : 'Authenticating…', register ? 'warn' : '');
-    if (register) $('pairState').textContent = 'Pairing: confirm the code on the iPhone and on the cluster.';
+    status(register ? 'Registering this device…' : 'Signing in…');
+    if (register) $('pairState').textContent = 'Registering… (with firmware older than 0.1.4, also confirm the pairing code on both screens)';
     // an empty line is ignored by the cluster, but the encrypted RX makes iOS pair / encrypt first
     await write(enc.encode('\n'));
     log('Link secure');
     if (register) {
       const k = await phoneKey();
-      await sendLine({ type: 'register', pub: k.pub, name: 'iPhone web' });
-      status('Paired. Registering this phone…');
+      await sendLine({ type: 'register', pub: k.pub, name: 'Diag web' });
+      status('Registering this device…');
     }
   } catch (e) {
     log('Connect failed: ' + e.message);
@@ -122,23 +123,23 @@ function onDisconnect() {
   link.authed = false;
   if (fw.running && fw.sender && fw.sender.state !== 'done') fw.sender.fail('Disconnected');
   log('Disconnected');
-  status('Cluster disconnected. Tap Connect cluster.', 'bad');
+  status('The cluster disconnected. Tap Connect cluster.', 'bad');
   render();
 }
 
 async function onLine(line) {
   let m;
   try { m = JSON.parse(line); } catch (_) { return; }
-  if (!['challenge', 'deviceStatus', 'otaAck', 'ccuFrame', 'ccuState'].includes(m.type)) log('← ' + line.slice(0, 160));
+  if (!['challenge', 'deviceStatus', 'otaAck', 'bikeFrame', 'bikeState'].includes(m.type)) log('← ' + line.slice(0, 160));
   switch (m.type) {
     case 'registered':
       if (!link.register || m.protocol !== PROTOCOL || !/^04[0-9a-f]{128}$/i.test(m.bikePub || '')) return;
       await kv('bikePub', m.bikePub.toLowerCase());
-      status('Phone registered. Authenticating…');
-      $('pairState').textContent = 'Registered with the cluster';
+      status('Device registered. Signing in…');
+      $('pairState').textContent = 'This device is registered with the cluster.';
       break;
     case 'challenge': {
-      if (m.protocol !== PROTOCOL) { status(`Cluster link ${m.protocol} not supported`, 'bad'); return; }
+      if (m.protocol !== PROTOCOL) { status(`This app does not support cluster link ${m.protocol}.`, 'bad'); return; }
       if (link.authed || !/^[0-9a-f]{64}$/.test(m.nonce || '') || m.nonce === link.bikeNonce) return;
       const k = await kv('phoneKey');
       if (!k || !(await kv('bikePub'))) { status(STATUS_HINT['Phone not registered'], 'bad'); return; }
@@ -153,7 +154,7 @@ async function onLine(line) {
       const pub = await crypto.subtle.importKey('raw', fromHex(await kv('bikePub')), ECDSA, false, ['verify']);
       const ok = await crypto.subtle.verify(SIGN, pub, fromHex(m.sig || ''),
         enc.encode(authText('bike', link.bikeNonce, link.phoneNonce))).catch(() => false);
-      if (!ok) { status("The cluster's answer is wrong (another cluster?)", 'bad'); link.dev.gatt.disconnect(); return; }
+      if (!ok) { status("The cluster's reply did not check out. Is this a different cluster?", 'bad'); link.dev.gatt.disconnect(); return; }
       link.authed = true;
       link.since = Date.now();
       log('Authenticated');
@@ -161,9 +162,9 @@ async function onLine(line) {
       break;
     }
     case 'deviceStatus': link.device = m; renderDetails(); checkUpdated(); renderFirmware(); break;
-    case 'ccuState': ccu.state = m; ccu.stateAt = Date.now(); renderCcuLinks(); break;
-    case 'ccuFrame': if (!ccu.demo) onCcuFrame(m.h); break;
-    case 'ccuConfig': ccuConfigReply(m); break;
+    case 'bikeState': unit.state = m; renderChips(); break;
+    case 'bikeFrame': if (!unit.demo) onUnitFrame(m.h); break;
+    case 'bikeConfig': unitConfigReply(m); break;
     case 'otaReady': case 'otaAck': case 'otaDone': case 'otaError': otaMessage(m); break;
     case 'routeAck':
       link.routeAck = `${m.points} points, ${m.steps} steps, ${(m.meters / 1000).toFixed(1)} km${m.simulation ? ', simulated' : ''}`;
@@ -193,8 +194,8 @@ async function onLinked() {
   await sendLine({ type: 'gpsSharing', enabled: gps.sharing });
   if (nav.line) { link.awaitingRouteId = nav.line.routeId; link.routeQueryAt = Date.now(); await sendLine({ type: 'routeQuery' }); }
   await sendLine(appearanceLine(appearance));
-  ccu.relayOn = null;   // the cluster starts with the relay off at each connection
-  await sendLine({ type: 'ccuQuery' }, true).catch(() => {});
+  unit.relayOn = null;   // the cluster starts with the relay off at each connection
+  await sendLine(bikeQueryLine(), true).catch(() => {});
   syncRelay();
 }
 
@@ -567,7 +568,7 @@ async function keepRoute() {
     detector.routeReplaced(Date.now());
     await sendRouteLine(l);
     drawRoutes([pick], 0);
-    status(`${kind === 'reroute' ? 'Rerouted' : 'Traffic ETA updated'} · ${Math.ceil(pick.duration / 60)} min`, 'ok');
+    status(`${kind === 'reroute' ? 'Rerouted' : 'Arrival time updated for traffic'} · ${Math.ceil(pick.duration / 60)} min`, 'ok');
   } catch (e) { status(`${kind === 'reroute' ? 'Reroute' : 'Traffic update'} failed: ${e.message}`, 'bad'); }
   finally { rerouting = false; }
 }
@@ -606,7 +607,7 @@ async function search(submitted = true) {
         viewbox: `${c.lon - 0.5},${c.lat + 0.5},${c.lon + 0.5},${c.lat - 0.5}` });
       const found = await fetch(u).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
       list.innerHTML = '';
-      if (!found.length) status('Nothing found', 'bad');
+      if (!found.length) status('No places found.', 'bad');
       for (const p of found) {
         const name = p.name || p.display_name.split(',')[0];
         list.appendChild(resultButton(name, p.display_name, () => { list.innerHTML = ''; setDestination({ name, lat: +p.lat, lon: +p.lon }); }));
@@ -624,7 +625,7 @@ async function pickGoogle(id, name) {
     session = crypto.randomUUID();
     if (!r.ok || !p.location) throw new Error((p.error && p.error.message) || 'no location');
     setDestination({ name, lat: p.location.latitude, lon: p.location.longitude });
-  } catch (e) { status('Place failed: ' + e.message, 'bad'); }
+  } catch (e) { status('Could not open the place: ' + e.message, 'bad'); }
 }
 function resultButton(title, sub, onclick) {
   const b = document.createElement('button');
@@ -741,7 +742,7 @@ function renderSaved() {
 }
 function saveCurrent() {
   if (!nav.dest) return;
-  if (saved().length >= 50) { status('Save up to 50 places.', 'bad'); return; }
+  if (saved().length >= 50) { status('You can save up to 50 places.', 'bad'); return; }
   askName('Save place', nav.dest.name, (n) => {
     store.set('saved', [...saved(), { name: n, latitude: nav.dest.lat, longitude: nav.dest.lon }]);
     status(`Saved "${n}"`, 'ok');
@@ -766,7 +767,7 @@ function renderAppearance() {
     : `rgb(${Math.round(60 + 195 * r)},${Math.round(60 + 195 * r)},${Math.round(70 + 185 * r)})`;
   $('btnClusterTheme').textContent = `Cluster theme: ${THEMES[appearance.clusterThemeMode] || THEMES[0]}`;
   $('slSim').value = appearance.simulationSpeedKph;
-  $('lblSim').textContent = `Simulation max speed ${appearance.simulationSpeedKph} km/h`;
+  $('lblSim').textContent = `Simulation top speed ${appearance.simulationSpeedKph} km/h`;
 }
 function saveAppearance() {
   store.set('appearance', appearance);
@@ -807,7 +808,7 @@ $('fwFile').onchange = async (e) => {
   if (f) {
     const bytes = new Uint8Array(await f.arrayBuffer());
     const d = appDesc(bytes);
-    if (!d) { status('Not an ESP32 firmware image', 'bad'); }
+    if (!d) { status('This file is not an ESP32 firmware image.', 'bad'); }
     else { fw.image = bytes; fw.desc = d; fw.name = f.name; fw.target = d.project === 'updater' ? 'updater' : 'app'; }
   }
   renderFirmware();
@@ -902,7 +903,7 @@ function checkUpdated() {
 // ---------- Setup boxes (were pushed pages), dialogs ----------
 function openPage(id) {
   showTab('setup');
-  if (id === 'pgSaved') renderSaved(); if (id === 'pgCluster') renderDetails(); if (id === 'pgCcu') renderCcuPage(); if (id === 'pgCaptures') renderCaptures();
+  if (id === 'pgSaved') renderSaved(); if (id === 'pgCluster') renderDetails(); if (id === 'pgUnit') renderUnitPage(); if (id === 'pgCaptures') renderCaptures();
   if (id === 'pgFirmware') renderFirmware(); if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance();
   const el = $(id); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' });
   render();
@@ -942,7 +943,7 @@ function renderDetails() {
     ['Firmware', d.clusterVersion || '-'],
     ['Firmware build', d.build || '-'],
     ['Updater', d.updaterVersion || '-'],
-    ['Phone GPS sharing', gps.sharing ? 'On' : 'Off'],
+    ['GPS sharing', gps.sharing ? 'On' : 'Off'],
     ['Last route', link.routeAck || '-'],
     ['Web app', VERSION],
   ];
@@ -953,7 +954,7 @@ function renderDetails() {
 async function render() {
   const reg = !!(await kv('bikePub'));
   const on = !!(link.dev && link.dev.gatt.connected);
-  $('btnLink').textContent = on ? 'Disconnect cluster' : (reg ? 'Connect cluster' : 'Register this iPhone');
+  $('btnLink').textContent = on ? 'Disconnect cluster' : (reg ? 'Connect cluster' : 'Register this device');
   $('btnLink').className = 'btn js-link' + (on && link.authed ? ' on' : '');
   $('btnGps').textContent = gps.sharing ? 'GPS sharing on' : 'Share GPS';
   $('btnGps').className = 'btn' + (gps.sharing ? ' on' : '');
@@ -962,7 +963,7 @@ async function render() {
   $('btnStop').hidden = !(linked() && nav.line);
   $('btnSimulate').disabled = !nav.choices.length || !linked();
   $('simHint').hidden = nav.choices.length > 0;
-  $('pairState').textContent = reg ? 'This phone is registered with a cluster.' : 'Not registered yet.';
+  $('pairState').textContent = reg ? 'This device is registered with a cluster.' : 'Not registered yet.';
   if (document.body.dataset.tab === 'setup') renderDetails();
   const label = $('btnLink').textContent;
   document.querySelectorAll('.js-link').forEach((b) => { b.textContent = label; b.className = 'btn js-link' + (on && link.authed ? ' on' : ''); });
@@ -970,62 +971,71 @@ async function render() {
 }
 
 
-// ---------- Yamaha CCU through the cluster (ccu.js: decoder and relay contract) ----------
-const ccu = { fields: new CcuFields(), state: null, stateAt: 0, relayOn: null, demo: false, demoT: null, demoStart: 0,
-  frames: 0, lastFrameAt: 0, rateFrames: [], rec: null, raw: [], rawPaused: false, rawDirty: false };
+// ---------- bike unit through the cluster (bikeunit.js: profiles, decoders, relay contract) ----------
+const profileOf = (id) => PROFILES[id] || PROFILES[DEFAULT_PROFILE];
+const unit = { profile: profileOf(store.get('unitProfile', DEFAULT_PROFILE)), fields: null, state: null, relayOn: null,
+  demo: false, demoT: null, demoStart: 0, frames: 0, lastFrameAt: 0, rateFrames: [], rec: null, raw: [], rawPaused: false, rawDirty: false };
+unit.fields = unit.profile.create();
 const STATUS_CLASS = { [ST_V]: 'verified', [ST_P]: 'plausible', [ST_U]: 'unknown', [ST_X]: 'notverified', [ST_N]: 'notfitted' };
 const nf = (v, d = 0) => (typeof v === 'number' ? v.toLocaleString('id-ID', { minimumFractionDigits: d, maximumFractionDigits: d }) : (v ?? '-'));
 const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-function onCcuFrame(h) {
+const hexOf = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+function onUnitFrame(h) {
   let b;
   try { b = fromHex(h); } catch (_) { return; }
-  const ok = ccu.fields.decode(b);
+  const ok = unit.fields.decode(b);
   const now = Date.now();
-  ccu.frames++; ccu.lastFrameAt = now; ccu.rateFrames.push(now);
-  if (ccu.rateFrames.length > 200) ccu.rateFrames.splice(0, 100);
-  if (ccu.rec) { ccu.rec.buf.push(captureLine(now, h.toLowerCase())); ccu.rec.frames++; }
-  if (!ccu.rawPaused) { ccu.raw.unshift({ t: now, h: h.toLowerCase(), ok, id: b[0] }); if (ccu.raw.length > 200) ccu.raw.length = 200; ccu.rawDirty = true; }
+  unit.frames++; unit.lastFrameAt = now; unit.rateFrames.push(now);
+  if (unit.rateFrames.length > 200) unit.rateFrames.splice(0, 100);
+  if (unit.rec) { unit.rec.buf.push(captureLine(now, h.toLowerCase())); unit.rec.frames++; }
+  if (!unit.rawPaused) { unit.raw.unshift({ t: now, h: h.toLowerCase(), ok, id: b[0] }); if (unit.raw.length > 200) unit.raw.length = 200; unit.rawDirty = true; }
 }
-// the relay runs while a CCU tab is on screen, or while recording
-const CCU_TABS = ['live', 'fields', 'raw', 'bike'];
-function wantRelay() { return ccu.rec !== null || CCU_TABS.includes(document.body.dataset.tab); }
+// the relay runs while a bike-data tab is on screen, or while recording
+const UNIT_TABS = ['live', 'fields', 'raw', 'bike'];
+function wantRelay() { return unit.rec !== null || UNIT_TABS.includes(document.body.dataset.tab); }
 function syncRelay() {
-  if (!linked() || ccu.demo) return;
+  if (!linked() || unit.demo) return;
   const want = wantRelay();
-  if (ccu.relayOn === want) return;
-  ccu.relayOn = want;
-  sendLine(ccuRelayLine(want), true).catch(() => { ccu.relayOn = null; });
+  if (unit.relayOn === want) return;
+  unit.relayOn = want;
+  sendLine(bikeRelayLine(want), true).catch(() => { unit.relayOn = null; });
 }
-function ccuStateName() {
-  if (ccu.demo) return 'demo';
-  if (!linked()) return 'off';
-  if (!ccu.state) return 'no reply (firmware 0.1.5 needed)';
-  return (CCU_STATES[ccu.state.state] || ccu.state.state).toLowerCase();
+function unitStateName() {
+  if (unit.demo) return 'Demo data';
+  if (!linked()) return 'Off';
+  if (!unit.state) return 'No reply (needs firmware 0.1.5)';
+  return UNIT_STATES[unit.state.state] || unit.state.state;
 }
-function rate() { const now = Date.now(); let n = 0; for (const t of ccu.rateFrames) if (now - t < 5000) n++; return n / 5; }
+function rate() { const now = Date.now(); let n = 0; for (const t of unit.rateFrames) if (now - t < 5000) n++; return n / 5; }
 function setText(id, v) { const e = $(id); if (e.textContent !== v) e.textContent = v; }
 function renderChips() {
   const on = linked();
-  setText('pillCluster', on ? 'linked' : (link.dev && link.dev.gatt.connected ? 'connecting' : 'off'));
+  setText('pillCluster', on ? 'Linked' : (link.dev && link.dev.gatt.connected ? 'Connecting' : 'Off'));
   $('chipCluster').className = 'chip ' + (on ? 'ok' : '');
-  const st = ccu.demo ? 'streaming' : (on && ccu.state ? ccu.state.state : 'off');
-  const live = Date.now() - ccu.lastFrameAt < 3000;
-  setText('pillCcu', ccuStateName());
-  $('chipCcu').className = 'chip ' + (st === 'streaming' && live ? 'ok' : st === 'rejected' ? 'bad' : ['scanning', 'connecting', 'reconnecting'].includes(st) ? 'warn' : '');
-  setText('chipRate', `${rate().toFixed(1)}/s`);
-  $('demoTag').hidden = !ccu.demo;
-  setText('recLabel', ccu.rec ? `Stop ${clock(Date.now() - ccu.rec.started)} · ${ccu.rec.frames}` : 'Record');
-  $('btnRecord').className = 'btn' + (ccu.rec ? ' rec' : '');
-  $('btnRecord').disabled = !ccu.rec && !ccu.demo && !linked();
+  const st = unit.demo ? 'streaming' : (on && unit.state ? unit.state.state : 'off');
+  const live = Date.now() - unit.lastFrameAt < 3000;
+  setText('pillUnit', unitStateName());
+  $('chipUnit').className = 'chip ' + (st === 'streaming' && live ? 'ok' : st === 'rejected' ? 'bad' : ['scanning', 'connecting', 'reconnecting'].includes(st) ? 'warn' : '');
+  setText('chipRate', `${nf(rate(), 1)} per second`);
+  $('demoTag').hidden = !unit.demo;
+  setText('recLabel', unit.rec ? `Stop recording · ${clock(Date.now() - unit.rec.started)} · ${unit.rec.frames}` : 'Record');
+  $('btnRecord').className = 'btn' + (unit.rec ? ' rec' : '');
+  $('btnRecord').disabled = !unit.rec && !unit.demo && !linked();
 }
 const clock = (ms) => { const s = Math.floor(ms / 1000); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+// Live cells come from the profile
+let liveBuiltFor = '';
+function buildLive() {
+  if (liveBuiltFor === unit.profile.id) return;
+  liveBuiltFor = unit.profile.id;
+  $('liveCells').innerHTML = unit.profile.live.map(([k, label, u], i) =>
+    `<div class="cell"><div class="k">${esc(label)} <em class="vs" data-k="${esc(k)}"></em></div><div class="v"><span id="lv${i}">-</span> <small>${esc(u)}</small></div></div>`).join('');
+}
 function renderLive() {
-  const f = ccu.fields, g = (k) => f.get(k);
-  const has = g('rpm') !== undefined;
-  const t = (id, v, d) => setText(id, v === undefined ? '-' : nf(v, d));
-  t('vRpm', g('rpm'), 0); t('vSpeed', g('speed'), 0); t('vEng', g('eng'), 0); t('vBatt', g('batt'), 1);
-  t('vThr', g('thr'), 0); t('vOdo', g('L0048'), 1); t('vMap', g('map'), 0); t('vIgn', g('ign'), 0);
-  document.querySelectorAll('.vs[data-k]').forEach((e) => {
+  buildLive();
+  const f = unit.fields;
+  unit.profile.live.forEach(([k, , , d], i) => { const v = f.get(k); setText('lv' + i, v === undefined ? '-' : nf(v, d)); });
+  document.querySelectorAll('#liveCells .vs[data-k]').forEach((e) => {
     const r = f.rows.get(e.dataset.k); const st = r ? r.status : '';
     const txt = st && st !== ST_V ? st : '';
     if (e.textContent !== txt) { e.textContent = txt; e.className = 'vs ' + (STATUS_CLASS[st] || ''); }
@@ -1033,13 +1043,15 @@ function renderLive() {
   const w = f.warning();
   $('attention').className = 'fault ' + (w.level === 'unknown' ? '' : w.level);
   setText('attentionText', w.text);
+  const has = f.rows.size > 0;
   $('engEmpty').hidden = has;
-  setText('engEmptyWhy', !linked() && !ccu.demo ? 'Connect the cluster. The cluster connects to the Yamaha CCU and passes its data here. Or turn on Demo data in Setup.'
-    : !ccu.state && !ccu.demo ? 'The cluster has not reported the CCU. Firmware 0.1.5 or later is needed for the CCU link.'
-    : ccu.state && ccu.state.state === 'noId' ? 'Send the phone ID to the cluster (Setup).'
-    : ccu.state && ccu.state.state === 'off' ? 'Turn on "Cluster connects to the CCU" (Setup).'
-    : ccu.state && ccu.state.state === 'rejected' ? 'The CCU rejected the phone ID.'
-    : 'Turn the key ON. CCU: ' + ccuStateName() + '.');
+  const st = unit.state && unit.state.state;
+  setText('engEmptyWhy', !linked() && !unit.demo ? 'Connect the cluster. It reads the bike unit and passes the data here. To try the screens without a bike, turn on Demo data in Setup.'
+    : !unit.state && !unit.demo ? 'The cluster has not reported a bike unit. Reading a bike unit needs cluster firmware 0.1.5 or later.'
+    : st === 'noKey' ? `Send the ${unit.profile.key.label.toLowerCase()} to the cluster (Setup).`
+    : st === 'off' ? 'Turn on "Cluster connects to the bike unit" (Setup).'
+    : st === 'rejected' ? `The bike unit rejected the ${unit.profile.key.label.toLowerCase()}.`
+    : 'Turn the key on. Bike unit: ' + unitStateName().toLowerCase() + '.');
 }
 const fmtVal = (r) => (typeof r.value === 'number' ? nf(r.value, Number.isInteger(r.value) ? 0 : (Math.abs(r.value) < 100 ? 2 : 1)) : String(r.value));
 const numFmt = (x) => (x === null || x === undefined ? '' : nf(x, Number.isInteger(x) ? 0 : 1));
@@ -1048,8 +1060,8 @@ const fieldRows = new Map();
 let fieldsLayout = '';
 function renderFields() {
   const showAll = $('showNotFitted').checked;
-  const groups = ccu.fields.groups(!showAll);
-  const layout = showAll + '|' + groups.map(([g, rows]) => g + ':' + rows.length).join(',');
+  const groups = unit.fields.groups(!showAll);
+  const layout = unit.profile.id + '|' + showAll + '|' + groups.map(([g, rows]) => g + ':' + rows.length).join(',');
   const body = $('fieldBody');
   if (layout !== fieldsLayout) {
     fieldsLayout = layout; fieldRows.clear(); body.textContent = '';
@@ -1073,70 +1085,75 @@ function renderFields() {
 }
 let rawDrawn = 0;
 function renderRaw(force = false) {
-  if (!ccu.rawDirty) return;
+  if (!unit.rawDirty) return;
   if (!force && Date.now() - rawDrawn < 500) return;   // twice a second is enough to read
-  rawDrawn = Date.now(); ccu.rawDirty = false;
-  const hide55 = $('rawLiveOnly').checked;
+  rawDrawn = Date.now(); unit.rawDirty = false;
+  const hideId = $('rawHideFrequent').checked ? unit.profile.frequent.id : -1;
   const rows = [];
-  for (const m of ccu.raw) {
+  for (const m of unit.raw) {
     if (rows.length >= 100) break;
-    if (hide55 && m.id === 0x55) continue;
+    if (m.id === hideId) continue;
     const d = new Date(m.t);
-    rows.push(`<tr><td>${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, '0')}</td><td>0x${m.id.toString(16).padStart(2, '0')}</td><td class="r">${m.h.length / 2}</td><td class="${m.ok ? '' : 'badsum'}">${m.ok ? 'OK' : 'BAD'}</td><td class="hex">${m.h}</td></tr>`);
+    // two lines per message: details, then the whole message in hex across the table
+    rows.push(`<tr class="rhead"><td>${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, '0')}</td><td>0x${m.id.toString(16).padStart(2, '0')}</td><td class="r">${m.h.length / 2}</td><td class="${m.ok ? '' : 'badsum'}">${m.ok ? 'OK' : 'Bad'}</td></tr><tr><td class="hex" colspan="4">${m.h}</td></tr>`);
   }
-  $('rawBody').innerHTML = rows.join('') || '<tr><td colspan="5" class="note">No messages yet.</td></tr>';
+  $('rawBody').innerHTML = rows.join('') || '<tr><td colspan="4" class="note">No messages yet.</td></tr>';
 }
-const BIKE_GROUPS = [
-  ['Identity', ['Lf190', 'Lf197', 'Lf194']],
-  ['Lifetime', ['L0048', 'Lf702', 'Lf1a2', 'Lf1a1', 'Lf701', 'Lff67']],
-  ['Faults', ['fcnt', 'dtc', 'L023a', 'Lf421', 'Lf44d']],
-];
 let bikeSig = '';
 function renderBike() {
-  const f = ccu.fields, html = [];
+  const f = unit.fields, html = [];
   const sec = (name, rows) => { if (!rows.length) return; html.push(`<tr class="grp"><td colspan="4">${esc(name)}</td></tr>`);
     for (const r of rows) html.push(`<tr><td>${esc(r.label)}</td><td class="r v">${esc(fmtVal(r))}</td><td>${esc(r.unit)}</td><td><span class="vs ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span></td></tr>`); };
-  for (const [name, keys] of BIKE_GROUPS) sec(name, keys.map((k) => f.rows.get(k)).filter(Boolean));
-  sec('Statistics (raw)', [...f.rows.values()].filter((r) => r.group === 'Statistics (raw)'));
+  for (const [name, keys] of unit.profile.bike) sec(name, keys.map((k) => f.rows.get(k)).filter(Boolean));
+  for (const g of unit.profile.bikeRawGroups) sec(g, [...f.rows.values()].filter((r) => r.group === g));
   const out = html.join('') || '<tr><td class="note">No data yet.</td></tr>';
   if (out !== bikeSig) { bikeSig = out; $('bikeBody').innerHTML = out; }
-  setText('bikeSub', ccu.demo ? 'Demo data: made-up values.' : 'Read from the CCU once per connection.');
+  setText('bikeSub', unit.demo ? 'Demo data: made-up values.' : `${unit.profile.name}. Read from the bike unit once per connection.`);
 }
-function renderCcuPage() {
-  const s = ccu.state || {};
-  const rows = [['State', ccuStateName()], ['CCU', s.name || '-'], ['Signal', s.rssi ? `${s.rssi} dBm` : '-'],
-    ['Messages (cluster)', nf(s.frames ?? 0)], ['Messages (here)', nf(ccu.frames)], ['Per second (here)', rate().toFixed(1)],
+function renderUnitPage() {
+  const s = unit.state || {};
+  const rows = [['State', unitStateName()], ['Unit name', s.name || '-'], ['Signal', s.rssi ? `${s.rssi} dBm` : '-'],
+    ['Messages read by the cluster', nf(s.frames ?? 0)], ['Messages received here', nf(unit.frames)], ['Messages per second here', nf(rate(), 1)],
     ['Heartbeats', nf(s.heartbeats ?? 0)], ['Reconnects', nf(s.reconnects ?? 0)],
-    ['Phone ID on cluster', s.idSet === undefined ? '-' : (s.idSet ? 'set' : 'not set')]];
+    [`${unit.profile.key.label} on the cluster`, s.keySet === undefined ? '-' : (s.keySet ? 'Stored' : 'Not stored')]];
   const html = rows.map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
-  if ($('ccuKv').innerHTML !== html) $('ccuKv').innerHTML = html;
-  $('ccuLinkOn').checked = !!(s.state && s.state !== 'off');
-  $('ccuLinkOn').disabled = !linked();
-  $('demoOn').checked = ccu.demo;
+  if ($('unitKv').innerHTML !== html) $('unitKv').innerHTML = html;
+  $('unitLinkOn').checked = !!(s.state && s.state !== 'off');
+  $('unitLinkOn').disabled = !linked();
+  $('demoOn').checked = unit.demo;
+  setText('keyLabel', unit.profile.key.label);
+  setText('keyHelp', `${unit.profile.key.help} It is sent once to the cluster and stored there. It is never shown again and never part of the website.`);
+  $('unitKey').placeholder = unit.profile.key.hint;
+  $('unitKey').setAttribute('aria-label', unit.profile.key.label);
 }
-function ccuConfigReply(m) {
-  $('ccuIdMsg').textContent = !m.ok ? 'The cluster did not accept the phone ID.' : m.idSet ? 'Stored on the cluster.' : 'Erased from the cluster.';
-  sendLine({ type: 'ccuQuery' }, true).catch(() => {});
+function unitConfigReply(m) {
+  const k = unit.profile.key.label;
+  $('unitKeyMsg').textContent = !m.ok ? `The cluster did not accept the ${k.toLowerCase()}.` : m.keySet ? `${k} stored on the cluster.` : `${k} erased from the cluster.`;
+  sendLine(bikeQueryLine(), true).catch(() => {});
 }
-const renderCcuLinks = renderChips;
+function setProfile(id) {
+  unit.profile = profileOf(id); store.set('unitProfile', unit.profile.id);
+  unit.fields = unit.profile.create(); unit.raw = []; unit.rawDirty = true; fieldsLayout = ''; liveBuiltFor = ''; bikeSig = '';
+  if (unit.demo) setDemo(true);
+  renderUnitPage();
+}
 
-// demo stream: made-up values at 10 messages per second, through the same decoder
+// demo data: made-up messages from the profile at 10 per second, through the same decoder
 function setDemo(on) {
-  ccu.demo = on;
-  clearInterval(ccu.demoT);
-  ccu.fields.clear(); ccu.frames = 0; ccu.rateFrames = []; ccu.raw = []; ccu.rawDirty = true; fieldsLayout = '';
-  if (on) {
-    ccu.demoStart = Date.now();
-    const hx = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-    onCcuFrame(hx(loginFrame(true)));
-    onCcuFrame(hx(identityFrame(DEMO_ID)));
-    ccu.demoT = setInterval(() => onCcuFrame(hx(liveFrame(demoValues((Date.now() - ccu.demoStart) / 1000)))), 100);
-  } else { ccu.relayOn = null; syncRelay(); }
-  log(on ? 'CCU demo data on' : 'CCU demo data off');
-  renderChips(); renderCcuPage();
+  unit.demo = on;
+  clearInterval(unit.demoT);
+  unit.fields.clear(); unit.frames = 0; unit.rateFrames = []; unit.raw = []; unit.rawDirty = true; fieldsLayout = '';
+  const demo = unit.profile.demo;
+  if (on && demo) {
+    unit.demoStart = Date.now();
+    demo.start().forEach((b) => onUnitFrame(hexOf(b)));
+    unit.demoT = setInterval(() => onUnitFrame(hexOf(demo.at((Date.now() - unit.demoStart) / 1000))), 100);
+  } else { unit.relayOn = null; syncRelay(); }
+  log(on ? 'Demo data on' : 'Demo data off');
+  renderChips(); renderUnitPage();
 }
 
-// captures: IndexedDB on this device, same line format as CCU Live
+// captures: IndexedDB on this device
 const capDb = new Promise((res, rej) => {
   const r = indexedDB.open('esp28-captures', 1);
   r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('sessions', { keyPath: 'id' }); d.createObjectStore('chunks', { autoIncrement: true }).createIndex('sid', 'sid'); };
@@ -1145,35 +1162,35 @@ const capDb = new Promise((res, rej) => {
 const capStore = async (name, mode) => (await capDb).transaction(name, mode).objectStore(name);
 const req = (r) => new Promise((ok, no) => { r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error); });
 async function flushCapture() {
-  const c = ccu.rec;
+  const c = unit.rec;
   if (!c || !c.buf.length) return;
   const text = c.buf.join(''); c.buf = [];
   await req((await capStore('chunks', 'readwrite')).add({ sid: c.id, text }));
-  await req((await capStore('sessions', 'readwrite')).put({ id: c.id, frames: c.frames, started: c.startedIso, demo: ccu.demo }));
+  await req((await capStore('sessions', 'readwrite')).put({ id: c.id, frames: c.frames, started: c.startedIso, demo: unit.demo, profile: unit.profile.id }));
 }
 setInterval(() => { flushCapture().catch(() => {}); }, 5000);
 async function toggleRecord() {
-  if (ccu.rec) {
+  if (unit.rec) {
     await flushCapture().catch(() => {});
-    status(`Capture saved · ${ccu.rec.frames} messages (Setup → Captures)`, 'ok');
-    ccu.rec = null; syncRelay(); renderChips(); return;
+    status(`Capture saved: ${unit.rec.frames} messages (Setup › Captures)`, 'ok');
+    unit.rec = null; syncRelay(); renderChips(); return;
   }
   const d = new Date(), p = (n) => String(n).padStart(2, '0');
-  ccu.rec = { id: `ccu_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${ccu.demo ? '_demo' : ''}`,
+  unit.rec = { id: `${unit.profile.id}_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${unit.demo ? '_demo' : ''}`,
     started: Date.now(), startedIso: d.toISOString(), frames: 0, buf: [] };
   syncRelay(); renderChips();
 }
 async function renderCaptures() {
   const host = $('capList');
   let all = [];
-  try { all = await req((await capStore('sessions', 'readonly')).getAll()); } catch (_) { host.innerHTML = '<p class="note">Storage is not available in this browser.</p>'; return; }
-  all.sort((a, b) => b.id.localeCompare(a.id));
+  try { all = await req((await capStore('sessions', 'readonly')).getAll()); } catch (_) { host.innerHTML = '<p class="note">This browser cannot store captures.</p>'; return; }
+  all.sort((a, b) => b.started.localeCompare(a.started));
   if (!all.length) { host.innerHTML = '<p class="note">No captures yet. Tap Record in the header.</p>'; return; }
   host.textContent = '';
   for (const c of all) {
     const row = document.createElement('div'); row.className = 'capitem';
     row.innerHTML = '<span></span><button class="btn">Download</button><button class="btn bad">Delete</button>';
-    row.firstChild.textContent = `${c.id} · ${nf(c.frames)} messages${c.demo ? ' · demo' : ''}`;
+    row.firstChild.textContent = `${c.id} · ${nf(c.frames)} messages${c.demo ? ' · demo data' : ''}`;
     const [dl, del] = row.querySelectorAll('button');
     dl.onclick = () => downloadCapture(c.id);
     del.onclick = () => confirmBox(`Delete ${c.id}?`, 'Delete', async () => {
@@ -1185,13 +1202,20 @@ async function renderCaptures() {
   }
 }
 async function downloadCapture(id) {
-  if (ccu.rec && ccu.rec.id === id) await flushCapture();
+  if (unit.rec && unit.rec.id === id) await flushCapture();
   const chunksOf = await req((await capStore('chunks', 'readonly')).index('sid').getAll(id));
   const blob = new Blob(chunksOf.map((c) => c.text), { type: 'text/plain' });
   const name = id + '.log';
   try { const file = new File([blob], name, { type: 'text/plain' }); if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; } } catch (_) {}
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+
+// theme: System follows the device; Light or Dark is kept on this device
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  const dark = t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.querySelector('meta[name=theme-color]').content = dark ? '#111418' : '#ffffff';
 }
 
 // tabs
@@ -1202,15 +1226,15 @@ function showTab(tab) {
   try { localStorage.setItem('esp28.tab', JSON.stringify(tab)); } catch (_) {}
   syncRelay();
   if (tab === 'map') startMap().catch((e) => status('Map failed: ' + e.message, 'bad'));
-  if (tab === 'setup') { renderDetails(); renderCcuPage(); renderCaptures(); renderSaved(); renderGoogle(); renderAppearance(); renderFirmware(); }
-  ccu.rawDirty = true; tick();
+  if (tab === 'setup') { renderDetails(); renderUnitPage(); renderCaptures(); renderSaved(); renderGoogle(); renderAppearance(); renderFirmware(); }
+  unit.rawDirty = true; tick();
 }
 // one timer, and only the visible tab is drawn (about 4 times a second)
 function tick() {
   renderChips();
   const tab = document.body.dataset.tab;
   if (tab === 'live') renderLive(); else if (tab === 'fields') renderFields(); else if (tab === 'raw') renderRaw();
-  else if (tab === 'bike') renderBike(); else if (tab === 'setup') renderCcuPage();
+  else if (tab === 'bike') renderBike(); else if (tab === 'setup') renderUnitPage();
 }
 setInterval(tick, 250);
 const hdr = document.querySelector('.hdr');
@@ -1270,22 +1294,28 @@ $('btnLiveGps').onclick = async () => {
 
 document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
 $('showNotFitted').onchange = () => { fieldsLayout = ''; renderFields(); };
-$('btnRawPause').onclick = () => { ccu.rawPaused = !ccu.rawPaused; $('btnRawPause').textContent = ccu.rawPaused ? 'Resume' : 'Pause'; };
-$('btnRawClear').onclick = () => { ccu.raw = []; ccu.rawDirty = true; renderRaw(true); };
-$('rawLiveOnly').onchange = () => { ccu.rawDirty = true; renderRaw(true); };
+$('btnRawPause').onclick = () => { unit.rawPaused = !unit.rawPaused; $('btnRawPause').textContent = unit.rawPaused ? 'Resume' : 'Pause'; };
+$('btnRawClear').onclick = () => { unit.raw = []; unit.rawDirty = true; renderRaw(true); };
+$('rawHideFrequent').onchange = () => { unit.rawDirty = true; renderRaw(true); };
 $('btnRecord').onclick = () => { toggleRecord().catch((e) => status('Capture failed: ' + e.message, 'bad')); };
-$('ccuLinkOn').onchange = (e) => { if (!linked()) return; sendLine(ccuLinkLine(e.target.checked)).then(() => sendLine({ type: 'ccuQuery' }, true)).catch(() => {}); };
+$('unitProfile').innerHTML = Object.values(PROFILES).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+$('unitProfile').value = unit.profile.id;
+$('unitProfile').onchange = (e) => setProfile(e.target.value);
+$('unitLinkOn').onchange = (e) => { if (!linked()) return; sendLine(bikeLinkLine(e.target.checked)).then(() => sendLine(bikeQueryLine(), true)).catch(() => {}); };
 $('demoOn').onchange = (e) => setDemo(e.target.checked);
-$('btnCcuIdShow').onclick = () => { const i = $('ccuId'); i.type = i.type === 'password' ? 'text' : 'password'; $('btnCcuIdShow').textContent = i.type === 'password' ? 'Show' : 'Hide'; };
-$('btnCcuIdSave').onclick = () => {
-  const v = $('ccuId').value.trim().toLowerCase();
-  if (!validPhoneId(v)) { $('ccuIdMsg').textContent = 'The phone ID is 32 characters, 0–9 and a–f.'; return; }
-  if (!linked()) { $('ccuIdMsg').textContent = 'Connect the cluster first.'; return; }
-  sendLine(ccuConfigLine(v), true).then(() => { $('ccuId').value = ''; $('ccuIdMsg').textContent = 'Sent. Waiting for the cluster…'; }).catch((e) => { $('ccuIdMsg').textContent = 'Not sent: ' + e.message; });
+$('btnKeyShow').onclick = () => { const i = $('unitKey'); i.type = i.type === 'password' ? 'text' : 'password'; $('btnKeyShow').textContent = i.type === 'password' ? 'Show' : 'Hide'; };
+$('btnKeySave').onclick = () => {
+  const k = unit.profile.key, v = k.normalize($('unitKey').value);
+  if (!k.valid(v)) { $('unitKeyMsg').textContent = `The ${k.label.toLowerCase()} must be ${k.hint}.`; return; }
+  if (!linked()) { $('unitKeyMsg').textContent = 'Connect the cluster first.'; return; }
+  sendLine(bikeConfigLine(unit.profile.id, v), true).then(() => { $('unitKey').value = ''; $('unitKeyMsg').textContent = 'Sent. Waiting for the cluster…'; }).catch((e) => { $('unitKeyMsg').textContent = 'Not sent: ' + e.message; });
 };
-$('btnCcuIdErase').onclick = () => confirmBox('Erase the phone ID from the cluster? The cluster can no longer log in to the CCU until you send it again.', 'Erase', () => {
-  if (linked()) sendLine(ccuConfigLine(''), true).catch(() => {});
+$('btnKeyErase').onclick = () => confirmBox(`Erase the ${unit.profile.key.label.toLowerCase()} from the cluster? The cluster cannot log in to the bike unit until you send it again.`, 'Erase', () => {
+  if (linked()) sendLine(bikeConfigLine(unit.profile.id, ''), true).catch(() => {});
 });
+$('themeSel').value = store.get('theme', 'system');
+$('themeSel').onchange = (e) => { store.set('theme', e.target.value); applyTheme(e.target.value); };
+applyTheme(store.get('theme', 'system'));
 // the stand-in cluster in tests feeds lines here (only with ?test in the address)
 if (/[?&]test\b/.test(location.search)) {
   const sent = [], dec = new TextDecoder();
@@ -1299,7 +1329,7 @@ if (/[?&]test\b/.test(location.search)) {
 $('ver').textContent = 'Web version ' + VERSION;
 { let t = 'live'; try { t = JSON.parse(localStorage.getItem('esp28.tab')) || 'live'; } catch (_) {} showTab(TABS.includes(t) ? t : 'live'); }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-if (!navigator.bluetooth) status('No Bluetooth in this browser. Open this page in Bluefy.', 'bad');
+if (!navigator.bluetooth) status(NO_BT, 'bad');
 if (navigator.geolocation) startWatch();
 log('Web version ' + VERSION);
 watchGoogleConsole();

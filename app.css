@@ -1,8 +1,13 @@
 /* ESP 2.8 Diag: plain, fast, system font only, no images or effects. Phone, tablet and laptop. */
 :root { --bg:#f4f5f6; --fg:#14181c; --mut:#56606a; --line:#d0d5da; --box:#ffffff; --pri:#1f4f8a; --on-pri:#ffffff;
   --ok:#0b6e3a; --warn:#8f4a00; --bad:#b3122a; --okbg:#e3f1e8; --warnbg:#f6ecdf; --badbg:#f8e1e4; color-scheme:light; }
-@media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#e8ecef; --mut:#a3adb6; --line:#2e353c; --box:#191d22; --pri:#8db8f0;
+/* dark: follows the device unless Setup › Display sets Light or Dark (data-theme on <html>) */
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --fg:#e8ecef; --mut:#a3adb6; --line:#2e353c; --box:#191d22; --pri:#8db8f0;
   --on-pri:#0b1319; --ok:#7fd6a4; --warn:#f2c27a; --bad:#f2939a; --okbg:#16291f; --warnbg:#2c2414; --badbg:#2f1b1e; color-scheme:dark; } }
+:root[data-theme="dark"] { --bg:#111418; --fg:#e8ecef; --mut:#a3adb6; --line:#2e353c; --box:#191d22; --pri:#8db8f0;
+  --on-pri:#0b1319; --ok:#7fd6a4; --warn:#f2c27a; --bad:#f2939a; --okbg:#16291f; --warnbg:#2c2414; --badbg:#2f1b1e; color-scheme:dark; }
+select { appearance:auto; }
+label.slider select { margin-top:4px; }
 * { box-sizing:border-box; }
 html, body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.35 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
 button, input, select { font:inherit; color:inherit; }
@@ -10,7 +15,7 @@ button, input, select { font:inherit; color:inherit; }
 .mono, pre, .grid td.raw, .grid td.hex { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:13px; }
 pre { white-space:pre-wrap; margin:0; }
 .note { color:var(--mut); font-size:13px; margin:6px 0; }
-.row { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; align-items:center; } .row input { flex:1 1 160px; }
+.row { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; align-items:center; } .row input:not([type=checkbox]) { flex:1 1 160px; }
 .grow { flex:1; }
 
 /* header, status, tabs */
@@ -63,7 +68,8 @@ label.slider { display:block; margin-top:8px; font-size:14px; }
 .grid th { font-weight:600; color:var(--mut); position:sticky; top:0; background:var(--box); }
 .grid td.r, .grid th.r { text-align:right; } .grid td.v { font-variant-numeric:tabular-nums; font-weight:600; }
 .grid td.raw { color:var(--mut); max-width:220px; overflow:hidden; text-overflow:ellipsis; }
-.grid td.hex { white-space:normal; word-break:break-all; min-width:200px; }
+.grid td.hex { white-space:normal; word-break:break-all; color:var(--mut); padding-top:0; }
+.grid tr.rhead td { border-bottom:0; padding-bottom:1px; }
 .grid tr.grp td { background:var(--bg); font-weight:600; color:var(--mut); font-size:12px; text-transform:uppercase; }
 .grid td.badsum { color:var(--bad); font-weight:700; }
 @media (max-width: 599px) { .grid .opt { display:none; } }

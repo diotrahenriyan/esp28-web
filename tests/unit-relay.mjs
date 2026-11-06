@@ -1,5 +1,5 @@
-// App side of the CCU relay contract (ccu.js header), against a stand-in cluster link.
-// Run from the repo root: node tests/ccu-relay.mjs   (needs Playwright + Chromium)
+// App side of the bike unit relay contract (bikeunit.js header), against a stand-in cluster link.
+// Run from the repo root: node tests/unit-relay.mjs   (needs Playwright + Chromium)
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -26,30 +26,30 @@ await pg.waitForTimeout(500);
 const sent = () => pg.evaluate(() => window.__esp28.sent.map((m) => ({ ...m })));
 const line = (o) => pg.evaluate((s) => window.__esp28.onLine(s), JSON.stringify(o));
 const frame = (expr) => pg.evaluate(async (e) => {
-  const m = await import('./ccu.js?v=2.8-w0.6.0'); const hx = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  const m = await import('./bikeunit.js?v=2.8-w0.6.0'); const hx = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
   // eslint-disable-next-line no-new-func
-  const f = new Function('m', 'return ' + e)(m); window.__esp28.onLine(JSON.stringify({ type: 'ccuFrame', t: 1, h: hx(f) }));
+  const f = new Function('m', 'return ' + e)(m); window.__esp28.onLine(JSON.stringify({ type: 'bikeFrame', t: 1, h: hx(f) }));
 }, expr);
 
 await pg.evaluate(() => window.__esp28.fakeLink());
 await pg.waitForTimeout(300);
 let s = await sent();
-check('on link: ccuQuery, then relay on (Live tab open)', s.some((m) => m.type === 'ccuQuery') && s.some((m) => m.type === 'ccuRelay' && m.on === true));
+check('on link: bikeQuery, then relay on (Live tab open)', s.some((m) => m.type === 'bikeQuery') && s.some((m) => m.type === 'bikeRelay' && m.on === true));
 
-await line({ type: 'ccuState', state: 'streaming', name: 'YSCCU_TEST', rssi: -60, frames: 5, heartbeats: 3, reconnects: 0, idSet: true });
+await line({ type: 'bikeState', profile: 'yamaha-yconnect', state: 'streaming', name: 'YSCCU_TEST', rssi: -60, frames: 5, heartbeats: 3, reconnects: 0, keySet: true });
 await frame('m.liveFrame({ ...m.demoValues(0), rpm: 2345, batt: 13.6, eng: 77, odo: 100.5 })');
 await pg.waitForTimeout(400);
-const ride = await pg.evaluate(() => ({ rpm: document.getElementById('vRpm').textContent, eng: document.getElementById('vEng').textContent,
-  batt: document.getElementById('vBatt').textContent, odo: document.getElementById('vOdo').textContent, ccu: document.getElementById('pillCcu').textContent }));
-check('ccuFrame drives the Live view (Indonesian number format)', ride.rpm === '2.345' && ride.eng === '77' && ride.batt === '13,6' && ride.odo === '100,5', JSON.stringify(ride));
-check('ccuState shows on the CCU chip', ride.ccu === 'streaming', ride.ccu);
+const ride = await pg.evaluate(() => ({ rpm: document.getElementById('lv0').textContent, eng: document.getElementById('lv2').textContent,
+  batt: document.getElementById('lv3').textContent, odo: document.getElementById('lv6').textContent, ccu: document.getElementById('pillUnit').textContent }));
+check('bikeFrame drives the Live view (Indonesian number format)', ride.rpm === '2.345' && ride.eng === '77' && ride.batt === '13,6' && ride.odo === '100,5', JSON.stringify(ride));
+check('bikeState shows on the bike unit chip', ride.ccu === 'Streaming', ride.ccu);
 
 await pg.click('.tabs [data-tab=map]'); await pg.waitForTimeout(200);
 s = await sent();
-check('Map tab: relay off', s.filter((m) => m.type === 'ccuRelay').pop().on === false);
+check('Map tab: relay off', s.filter((m) => m.type === 'bikeRelay').pop().on === false);
 await pg.click('.tabs [data-tab=live]'); await pg.click('#btnRecord'); await pg.click('.tabs [data-tab=setup]'); await pg.waitForTimeout(200);
 s = await sent();
-check('recording keeps the relay on outside the CCU tabs (Setup open)', s.filter((m) => m.type === 'ccuRelay').pop().on === true);
+check('recording keeps the relay on outside the CCU tabs (Setup open)', s.filter((m) => m.type === 'bikeRelay').pop().on === true);
 await frame('m.liveFrame(m.demoValues(1))'); await frame('m.liveFrame(m.demoValues(2))');
 await pg.click('#btnRecord'); await pg.waitForTimeout(600);
 const cap = await pg.evaluate(async () => new Promise((ok) => { const r = indexedDB.open('esp28-captures', 1); r.onsuccess = () => {
@@ -59,20 +59,20 @@ const lines = cap.text.trim().split('\n');
 check('capture saved: 2 messages, "<seconds> <hex>" lines', cap.sessions.length === 1 && cap.sessions[0].frames === 2 && lines.length === 2 && lines.every((l) => /^\d+\.\d{3} [0-9a-f]+$/.test(l)), `${cap.sessions.length} sessions, ${lines.length} lines`);
 
 
-await pg.fill('#ccuId', '0123456789abcdef0123456789abcdef');
-await pg.click('#btnCcuIdSave'); await pg.waitForTimeout(200);
+await pg.fill('#unitKey', '0123456789abcdef0123456789abcdef');
+await pg.click('#btnKeySave'); await pg.waitForTimeout(200);
 s = await sent();
-const cfg = s.filter((m) => m.type === 'ccuConfig').pop();
-check('phone ID sent as ccuConfig', cfg && cfg.phoneId === '0123456789abcdef0123456789abcdef');
+const cfg = s.filter((m) => m.type === 'bikeConfig').pop();
+check('login key sent as bikeConfig with the profile', cfg && cfg.key === '0123456789abcdef0123456789abcdef' && cfg.profile === 'yamaha-yconnect');
 const logText = await pg.evaluate(() => document.getElementById('log').textContent);
-check('phone ID not in the Log, field cleared', !logText.includes('0123456789abcdef') && (await pg.inputValue('#ccuId')) === '');
-await pg.fill('#ccuId', 'not-hex'); await pg.click('#btnCcuIdSave');
-check('bad phone ID refused on the phone', /32 characters/.test(await pg.textContent('#ccuIdMsg')));
-await line({ type: 'ccuConfig', ok: true, idSet: true }); await pg.waitForTimeout(100);
-check('ccuConfig reply shown', /Stored on the cluster/.test(await pg.textContent('#ccuIdMsg')));
-await pg.click('#ccuLinkOn'); await pg.waitForTimeout(200);
+check('phone ID not in the Log, field cleared', !logText.includes('0123456789abcdef') && (await pg.inputValue('#unitKey')) === '');
+await pg.fill('#unitKey', 'not-hex'); await pg.click('#btnKeySave');
+check('bad login key refused on the device', /32 characters/.test(await pg.textContent('#unitKeyMsg')));
+await line({ type: 'bikeConfig', ok: true, keySet: true, profile: 'yamaha-yconnect' }); await pg.waitForTimeout(100);
+check('bikeConfig reply shown', /stored on the cluster/.test(await pg.textContent('#unitKeyMsg')));
+await pg.click('#unitLinkOn'); await pg.waitForTimeout(200);
 s = await sent();
-check('switch sends ccuLink', s.some((m) => m.type === 'ccuLink'));
+check('switch sends bikeLink', s.some((m) => m.type === 'bikeLink'));
 check('no page errors', errors.length === 0, errors.join(' | '));
 
 await browser.close(); server.close();

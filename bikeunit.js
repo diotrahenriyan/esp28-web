@@ -1,28 +1,34 @@
-// Yamaha Y-Connect CCU (Y08U-A00) data, relayed by the ESP 2.8 cluster.
-// Decoder and field table ported from CCU Live v1.0 (yamaha_ccu_debug/web/index.html, 2026-11-06),
-// verification status per field as in CAPABILITIES - CCU Live_v1.0.
+// Bike units: the data box on a bike (for example Yamaha's Y-Connect CCU) that the ESP 2.8 cluster
+// reads and relays to this app. Everything specific to one make or unit is a PROFILE below; the app
+// itself only knows the profile interface (name, login key rules, live cells, decoder, demo frames).
 //
-// Relay contract (cluster <-> phone, MUTECH-BLE/2 JSON lines; the cluster implements it in firmware
-// 0.1.5, see "SPEC - ESP 2.8 CCU relay_v1.0"):
-//   phone -> cluster  {"type":"ccuConfig","phoneId":"<32 hex>"}  store the phone ID the CCU knows ("" erases)
-//                     {"type":"ccuLink","on":true|false}          cluster connects to the CCU (kept across restarts)
-//                     {"type":"ccuRelay","on":true|false}         forward CCU frames to this phone (off at each connect)
-//                     {"type":"ccuQuery"}                         answer with ccuState now
-//   cluster -> phone  {"type":"ccuConfig","ok":true,"idSet":true|false}
-//                     {"type":"ccuState","state":"off|noId|scanning|connecting|streaming|reconnecting|rejected",
-//                      "name":"YSCCU_…","rssi":-60,"frames":n,"heartbeats":n,"reconnects":n,"idSet":true}
-//                     {"type":"ccuFrame","t":<cluster ms>,"h":"<the CCU notification in hex, checksum included>"}
-// Frames go through unchanged, so the phone's decoder and captures are the same as CCU Live's.
+// Relay contract (cluster <-> app, MUTECH-BLE/2 JSON lines; the cluster implements it in firmware
+// 0.1.5, see "SPEC - ESP 2.8 bike unit relay_v1.0"):
+//   app -> cluster  {"type":"bikeConfig","profile":"<profile id>","key":"<login key>"}  store the unit type and
+//                                                       its login key on the cluster ("" key erases it)
+//                   {"type":"bikeLink","on":true|false}  the cluster connects to the bike unit (kept across restarts)
+//                   {"type":"bikeRelay","on":true|false} forward unit messages to this app (off at each connection)
+//                   {"type":"bikeQuery"}                 answer with bikeState now
+//   cluster -> app  {"type":"bikeConfig","ok":true,"keySet":true|false,"profile":"<id>"}
+//                   {"type":"bikeState","profile":"<id>","state":"off|noKey|scanning|connecting|streaming|reconnecting|rejected",
+//                    "name":"<unit Bluetooth name>","rssi":-60,"frames":n,"heartbeats":n,"reconnects":n,"keySet":true}
+//                   {"type":"bikeFrame","t":<cluster ms>,"h":"<one unit message in hex, unchanged>"}
+// Messages go through unchanged, so each profile's decoder and the captures stay the unit's own format.
 
-export const CCU_STATES = {
-  off: 'Off', noId: 'Phone ID not set', scanning: 'Looking for the CCU', connecting: 'Connecting',
+export const UNIT_STATES = {
+  off: 'Off', noKey: 'Login key not set', scanning: 'Looking for the bike unit', connecting: 'Connecting',
   streaming: 'Streaming', reconnecting: 'Reconnecting', rejected: 'Login rejected',
 };
+export const bikeConfigLine = (profile, key) => ({ type: 'bikeConfig', profile, key });
+export const bikeLinkLine = (on) => ({ type: 'bikeLink', on: !!on });
+export const bikeRelayLine = (on) => ({ type: 'bikeRelay', on: !!on });
+export const bikeQueryLine = () => ({ type: 'bikeQuery' });
+// capture line: "<seconds> <hex>\n" (for Yamaha units the format CCU Live and decode_log.py use)
+export const captureLine = (ms, h) => `${(ms / 1000).toFixed(3)} ${h}\n`;
 
-export const ccuConfigLine = (phoneId) => ({ type: 'ccuConfig', phoneId });
-export const ccuLinkLine = (on) => ({ type: 'ccuLink', on: !!on });
-export const ccuRelayLine = (on) => ({ type: 'ccuRelay', on: !!on });
-export const validPhoneId = (s) => /^[0-9a-f]{32}$/.test(s || '');
+// ======================= Profile: Yamaha Y-Connect (CCU Y08U-A00) =======================
+// Decoder and field table ported from CCU Live v1.0 (yamaha_ccu_debug/web/index.html, 2026-11-06),
+// verification status per field as in CAPABILITIES - CCU Live_v1.0.
 
 // verification status of a field
 export const V = 'Verified', P = 'Plausible', U = 'Unit unknown', N = 'Not fitted', X = 'Not verified';
@@ -69,7 +75,7 @@ export const checksum = (bytes) => { let s = 0; for (const x of bytes) s += x; r
 export const withChecksum = (bytes) => Uint8Array.from([...bytes, checksum(bytes)]);
 
 // Field store: key -> { group, label, value, unit, raw, status, min, max, n }
-export class CcuFields {
+export class YamahaFields {
   constructor() { this.rows = new Map(); this.frames = 0; this.bad = 0; }
   clear() { this.rows.clear(); this.frames = 0; this.bad = 0; }
   get(key) { const r = this.rows.get(key); return r ? r.value : undefined; }
@@ -79,7 +85,7 @@ export class CcuFields {
     r.value = value; r.raw = raw; r.n++;
     if (typeof value === 'number') { r.min = r.min === null ? value : Math.min(r.min, value); r.max = r.max === null ? value : Math.max(r.max, value); }
   }
-  // one CCU notification (bytes, checksum last)
+  // one unit message (bytes, checksum last)
   decode(b) {
     this.frames++;
     if (b.length < 4) return false;
@@ -128,8 +134,6 @@ export class CcuFields {
   }
 }
 
-// capture line, same format as CCU Live and decode_log.py: "<seconds> <hex>\n"
-export const captureLine = (ms, h) => `${(ms / 1000).toFixed(3)} ${h}\n`;
 
 // ---- synthetic frames: tests and the demo stream (no real bike data) ----
 function liveBytes(v) {
@@ -164,3 +168,35 @@ export function demoValues(t) {
     map: 36 + 50 * blip, baro: 92.6, fcnt: 0, dtc: 0, odo: 18420.4 };
 }
 export const DEMO_ID = { vin: 'DEMO0000000000000', model: 'DEMO', ignitions: 1234 };
+
+// the profile the app uses
+export const YAMAHA_YCONNECT = {
+  id: 'yamaha-yconnect',
+  name: 'Yamaha Y-Connect (CCU)',
+  key: { label: 'Phone ID', hint: '32 characters, 0–9 and a–f',
+    help: 'The phone ID this unit already knows from the Y-Connect pairing.',
+    normalize: (s) => (s || '').trim().toLowerCase(), valid: (s) => /^[0-9a-f]{32}$/.test(s || '') },
+  // the message this unit sends many times a second (Raw can hide it)
+  frequent: { id: 0x55, label: 'live engine data' },
+  // Live screen cells: field key, label, unit, decimals
+  live: [
+    ['rpm', 'Engine speed', 'rpm', 0], ['speed', 'Speed', 'km/h', 0], ['eng', 'Engine temperature', '°C', 0],
+    ['batt', 'Battery', 'V', 1], ['thr', 'Throttle', '%', 0], ['map', 'Intake pressure', 'kPa', 0],
+    ['L0048', 'Odometer', 'km', 1], ['ign', 'Ignition timing', '°', 0],
+  ],
+  // Bike screen sections: title, field keys; plus every field of the listed raw groups
+  bike: [
+    ['Identity', ['Lf190', 'Lf197', 'Lf194']],
+    ['Lifetime', ['L0048', 'Lf702', 'Lf1a2', 'Lf1a1', 'Lf701', 'Lff67']],
+    ['Faults', ['fcnt', 'dtc', 'L023a', 'Lf421', 'Lf44d']],
+  ],
+  bikeRawGroups: ['Statistics (raw)'],
+  modelKey: 'Lf197',
+  create: () => new YamahaFields(),
+  // made-up messages for Demo data (no real bike data)
+  demo: { start: () => [loginFrame(true), identityFrame(DEMO_ID)], at: (t) => liveFrame(demoValues(t)) },
+};
+
+// every profile the app knows; add a new make or unit here
+export const PROFILES = { [YAMAHA_YCONNECT.id]: YAMAHA_YCONNECT };
+export const DEFAULT_PROFILE = YAMAHA_YCONNECT.id;

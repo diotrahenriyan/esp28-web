@@ -12,10 +12,10 @@
 <body data-tab="live">
 <header class="hdr">
   <b class="name">ESP 2.8 Diag</b>
-  <span class="chip" id="chipCluster"><i></i>Cluster: <span id="pillCluster">off</span></span>
-  <span class="chip" id="chipCcu"><i></i>CCU: <span id="pillCcu">off</span></span>
-  <span class="chip mono" id="chipRate">0.0/s</span>
-  <span class="chip demo" id="demoTag" hidden>DEMO DATA</span>
+  <span class="chip" id="chipCluster"><i></i>Cluster: <span id="pillCluster">Off</span></span>
+  <span class="chip" id="chipUnit"><i></i>Bike unit: <span id="pillUnit">Off</span></span>
+  <span class="chip mono" id="chipRate">0,0 per second</span>
+  <span class="chip demo" id="demoTag" hidden>Demo data</span>
   <span class="grow"></span>
   <button class="btn js-link" id="btnLink">Connect cluster</button>
   <button class="btn" id="btnRecord"><span id="recLabel">Record</span></button>
@@ -30,24 +30,15 @@
 <!-- Live: key values, one cell each -->
 <section class="tab" id="tabLive">
   <div class="fault" id="attention"><span id="attentionText">Fault status not read yet</span></div>
-  <div class="cells">
-    <div class="cell"><div class="k">Engine speed <em class="vs" data-k="rpm"></em></div><div class="v"><span id="vRpm">-</span> <small>rpm</small></div></div>
-    <div class="cell"><div class="k">Speed <em class="vs" data-k="speed"></em></div><div class="v"><span id="vSpeed">-</span> <small>km/h</small></div></div>
-    <div class="cell"><div class="k">Engine temperature <em class="vs" data-k="eng"></em></div><div class="v"><span id="vEng">-</span> <small>°C</small></div></div>
-    <div class="cell"><div class="k">Battery <em class="vs" data-k="batt"></em></div><div class="v"><span id="vBatt">-</span> <small>V</small></div></div>
-    <div class="cell"><div class="k">Throttle <em class="vs" data-k="thr"></em></div><div class="v"><span id="vThr">-</span> <small>%</small></div></div>
-    <div class="cell"><div class="k">Intake pressure <em class="vs" data-k="map"></em></div><div class="v"><span id="vMap">-</span> <small>kPa</small></div></div>
-    <div class="cell"><div class="k">Odometer</div><div class="v"><span id="vOdo">-</span> <small>km</small></div></div>
-    <div class="cell"><div class="k">Ignition timing <em class="vs" data-k="ign"></em></div><div class="v"><span id="vIgn">-</span> <small>°</small></div></div>
-  </div>
-  <p class="note" id="engEmpty"><span id="engEmptyWhy">Connect the cluster. The cluster connects to the Yamaha CCU and passes its data here.</span></p>
+  <div class="cells" id="liveCells"></div>
+  <p class="note" id="engEmpty"><span id="engEmptyWhy">Connect the cluster. It reads the bike unit and passes the data here.</span></p>
 </section>
 
 <!-- Fields: every decoded field, updated in place -->
 <section class="tab" id="tabFields">
   <label class="inline"><input type="checkbox" id="showNotFitted"> Show fields this bike does not have</label>
   <div class="scroll"><table class="grid" id="fieldTable">
-    <thead><tr><th>Field</th><th class="r">Value</th><th>Unit</th><th class="r opt">Min</th><th class="r opt">Max</th><th class="opt">Raw</th><th>Status</th></tr></thead>
+    <thead><tr><th>Field</th><th class="r">Value</th><th>Unit</th><th class="r opt">Minimum</th><th class="r opt">Maximum</th><th class="opt">Raw value</th><th>Status</th></tr></thead>
     <tbody id="fieldBody"><tr><td colspan="7" class="note">No data yet.</td></tr></tbody>
   </table></div>
 </section>
@@ -55,17 +46,17 @@
 <!-- Raw: the last messages as received -->
 <section class="tab" id="tabRaw">
   <div class="row"><button class="btn" id="btnRawPause">Pause</button><button class="btn" id="btnRawClear">Clear</button>
-    <label class="inline"><input type="checkbox" id="rawLiveOnly"> Hide live engine (0x55)</label></div>
+    <label class="inline"><input type="checkbox" id="rawHideFrequent"> Hide live data</label></div>
   <div class="scroll"><table class="grid mono" id="rawTable">
-    <thead><tr><th>Time</th><th>ID</th><th class="r">Bytes</th><th>Sum</th><th>Hex</th></tr></thead>
+    <thead><tr><th>Time</th><th>Message ID</th><th class="r">Bytes</th><th>Checksum</th></tr></thead>
     <tbody id="rawBody"></tbody>
   </table></div>
-  <p class="note">Newest 100 of the last 200 CCU messages, newest first, redrawn twice a second. Sum: checksum OK or BAD.</p>
+  <p class="note">The 100 newest messages from the bike unit, newest first, each with its bytes in hex below. Updated twice a second.</p>
 </section>
 
 <!-- Bike: read once per connection -->
 <section class="tab" id="tabBike">
-  <p class="note" id="bikeSub">Read from the CCU once per connection.</p>
+  <p class="note" id="bikeSub">Read from the bike unit once per connection.</p>
   <div class="scroll"><table class="grid"><tbody id="bikeBody"><tr><td class="note">No data yet.</td></tr></tbody></table></div>
 </section>
 
@@ -85,7 +76,7 @@
         <div class="row"><button class="btn pri" id="btnSend" disabled>Send route</button><button class="btn" id="btnSave">Save place</button><button class="btn" id="btnClear">Close</button></div>
       </div>
       <button class="btn bad" id="btnStop" hidden>Stop navigation</button>
-      <p class="note">Hold (or right-click) a spot on the map to drive there.</p>
+      <p class="note">To drive somewhere, press and hold that spot on the map (right-click on a laptop).</p>
       <p class="note" id="mapAttrib"></p>
     </div>
   </div>
@@ -99,42 +90,43 @@
       <div class="kv" id="details"></div>
       <button class="btn js-link">Connect cluster</button>
     </div>
-    <div class="box" id="pgCcu">
-      <h3>Yamaha CCU (through the cluster)</h3>
-      <div class="kv" id="ccuKv"></div>
-      <label class="inline"><input type="checkbox" id="ccuLinkOn"> Cluster connects to the CCU</label>
-      <p class="note">Phone ID: the 32-character ID the CCU already knows. Sent once to the cluster and stored there; never shown again, never in the website.</p>
-      <div class="row"><input type="password" id="ccuId" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="32 characters, 0-9 a-f" aria-label="Phone ID">
-        <button class="btn" id="btnCcuIdShow">Show</button></div>
-      <div class="row"><button class="btn pri" id="btnCcuIdSave">Send to cluster</button><button class="btn bad" id="btnCcuIdErase">Erase from cluster</button></div>
-      <p class="note" id="ccuIdMsg"></p>
+    <div class="box" id="pgUnit">
+      <h3>Bike unit (read by the cluster)</h3>
+      <label class="slider">Unit type<select id="unitProfile" aria-label="Unit type"></select></label>
+      <div class="kv" id="unitKv"></div>
+      <label class="inline"><input type="checkbox" id="unitLinkOn"> Cluster connects to the bike unit</label>
+      <p class="note"><b id="keyLabel">Login key</b>: <span id="keyHelp"></span></p>
+      <div class="row"><input type="password" id="unitKey" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="" aria-label="Login key">
+        <button class="btn" id="btnKeyShow">Show</button></div>
+      <div class="row"><button class="btn pri" id="btnKeySave">Send to the cluster</button><button class="btn bad" id="btnKeyErase">Erase from the cluster</button></div>
+      <p class="note" id="unitKeyMsg"></p>
       <label class="inline"><input type="checkbox" id="demoOn"> Demo data (made-up values, no bike needed)</label>
     </div>
     <div class="box" id="pgCaptures">
       <h3>Captures (on this device)</h3>
-      <p class="note">One CCU message per line: time in seconds, then the message in hex. Same format as CCU Live and decode_log.py.</p>
+      <p class="note">One message per line: the time in seconds, then the message in hex. For Yamaha units this is the format CCU Live and decode_log.py read.</p>
       <div id="capList"></div>
     </div>
     <div class="box" id="pgPairing">
       <h3>Registration</h3>
       <div id="pairState" class="note">…</div>
-      <p class="note">Firmware 0.1.4 or later: no BOOT, no pairing code. Tap Register and choose "ESP 2.8 Cluster".</p>
+      <p class="note">With cluster firmware 0.1.4 or later there is no BOOT button and no pairing code. Tap Register this device, then choose "ESP 2.8 Cluster".</p>
       <div class="row"><button class="btn" id="btnRegister">Register this device</button><button class="btn bad" id="btnForget">Erase pairing data</button></div>
     </div>
     <div class="box" id="pgFirmware">
       <h3>Firmware update</h3>
       <div class="note" id="fwInstalled">Cluster: not connected</div>
-      <p class="note">Choose speedo.bin (app) or updater.bin. The cluster only accepts images signed with its own key and keeps the current firmware if anything fails.</p>
+      <p class="note">Choose speedo.bin (the cluster app) or updater.bin. The cluster accepts only images signed with its own key, and keeps its current firmware if anything fails.</p>
       <input type="file" id="fwFile" accept=".bin,application/octet-stream">
       <div id="fwInfo" hidden><div class="kv" id="fwKv"></div><div id="fwVerdict" class="status"></div></div>
       <button class="btn pri" id="btnFwInstall" disabled>Install on the cluster</button>
       <div id="fwProgress" hidden><div id="fwStep">…</div><div class="bar"><i id="fwBar"></i></div><button id="btnFwCancel" class="btn bad">Cancel update</button></div>
     </div>
     <div class="box" id="pgGoogle">
-      <h3>Google maps and routes (optional)</h3>
+      <h3>Google Maps and routes (optional)</h3>
       <div id="googleState" class="note"></div>
       <input id="gkey" placeholder="Google API key (optional)" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Google API key">
-      <p class="note">Stored on this device only. Empty = free OpenStreetMap. Each request type stops at 99% of its free monthly amount.</p>
+      <p class="note">Stored on this device only. Leave it empty to use free OpenStreetMap. Each kind of Google request stops at 99% of its free monthly amount.</p>
       <div class="row"><button class="btn" id="btnReload">Reload to apply</button><button class="btn" id="btnTestKey">Test key</button></div>
       <select id="optMode" aria-label="Vehicle"><option value="TWO_WHEELER">Motorbike</option><option value="DRIVE">Car</option></select>
       <label class="inline"><input type="checkbox" id="optTolls"> Avoid tolls</label>
@@ -145,7 +137,7 @@
     <div class="box" id="pgSaved">
       <h3>Saved places</h3>
       <div id="savedList"></div>
-      <p class="note" id="savedEmpty">None yet. Pick a destination on Map, then Save place.</p>
+      <p class="note" id="savedEmpty">No saved places yet. Pick a destination on Map, then tap Save place.</p>
     </div>
     <div class="box" id="pgAppearance">
       <h3>Map appearance (sent to the cluster)</h3>
@@ -155,11 +147,15 @@
       <label class="slider"><span id="lblTerrain"></span><input type="range" id="slTerrain" min="5" max="100"></label>
       <div class="row"><button class="btn" id="btnResetMode">Reset this mode</button><button class="btn" id="btnClusterTheme">Cluster theme: Auto</button></div>
     </div>
+    <div class="box" id="pgDisplay">
+      <h3>Display</h3>
+      <label class="slider">Theme<select id="themeSel" aria-label="Theme"><option value="system">System (follows this device)</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+    </div>
     <div class="box" id="pgDebug">
       <h3>Route simulation</h3>
-      <p class="note" id="simHint">Choose a destination and route on Map first.</p>
+      <p class="note" id="simHint">Choose a destination and a route on Map first.</p>
       <label class="slider"><span id="lblSim"></span><input type="range" id="slSim" min="5" max="300"></label>
-      <div class="row"><button class="btn" id="btnSimulate">Simulate selected route</button><button class="btn" id="btnLiveGps">Use phone GPS</button></div>
+      <div class="row"><button class="btn" id="btnSimulate">Simulate selected route</button><button class="btn" id="btnLiveGps">Use real GPS</button></div>
     </div>
   </div>
   <p class="note"><span id="ver">Web version 2.8-w0.6.0</span></p>
