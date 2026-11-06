@@ -38,13 +38,17 @@ let fails = 0;
 const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`); if (!ok) fails++; };
 
 const browser = await chromium.launch();
-async function run(mode, key, waitMs) {
+async function run(mode, key, waitMs, act) {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   await page.route('https://maps.googleapis.com/**', (r) => r.fulfill({ contentType: 'text/javascript', body: stub(mode) }));
   await page.route('https://tile.openstreetmap.org/**', (r) => r.fulfill({ status: 204 }));
   await page.addInitScript((k) => { if (k) localStorage.setItem('esp28.gkey', JSON.stringify(k)); }, key);
+  await page.route('https://routes.googleapis.com/**', (r) => r.fulfill({ status: 403, contentType: 'application/json',
+    body: JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', message: 'Requests from this Android client application <empty> are blocked.' } }) }));
+  await page.route('https://places.googleapis.com/**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: '{"suggestions":[]}' }));
   await page.goto(BASE);
+  if (act) await page.evaluate(act);
   await page.waitForTimeout(waitMs);
   const r = await page.evaluate(() => ({
     log: document.getElementById('log').textContent,
@@ -72,6 +76,13 @@ check('  key never printed', !/TESTKEY/.test(r.log));
 
 r = await run('noTiles', 'TESTKEY', 16500);
 check('tiles never load → falls back after 15 s', r.leaflet && !r.google && /tiles did not load/.test(r.log));
+check('  diag line: size and requests', /Google diag: map \d+x\d+/.test(r.log) && /requests: /.test(r.log));
+check('  diag line has no key', !/TESTKEY/.test(r.log));
+
+r = await run('ok', 'TESTKEY', 1500, () => document.getElementById('btnTestKey').click());
+check('key test: Routes error message logged', /Key test Routes: HTTP 403 PERMISSION_DENIED — Requests from this Android client/.test(r.log), r.log.split('\n').filter((l) => /Key test/.test(l)).join(' | '));
+check('key test: Places OK logged', /Key test Places: HTTP 200 OK/.test(r.log));
+check('key test: key never printed', !/TESTKEY/.test(r.log));
 
 await browser.close();
 server.close();

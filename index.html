@@ -98,7 +98,7 @@
     <button class="secondary" data-open="pgAppearance">Map appearance</button>
     <button class="secondary" data-open="pgDebug">Diagnostics and simulation</button>
     <button class="secondary" data-open="pgLog">Log</button>
-    <div class="dim" style="margin-top:16px" id="ver">Web version 2.8-w0.5.1</div>
+    <div class="dim" style="margin-top:16px" id="ver">Web version 2.8-w0.5.2</div>
     <div class="dim" id="mapAttrib"></div>
   </div>
 
@@ -145,6 +145,7 @@
       <input id="gkey" placeholder="Google API key (optional)" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin-top:10px">
       <div class="dim">Stored on this iPhone only, never in the app's code. Leave empty for free OpenStreetMap. The key needs Maps JavaScript API, Places API (New) and Routes API enabled.</div>
       <button id="btnReload" class="secondary">Reload to apply</button>
+      <button id="btnTestKey" class="secondary">Test key (writes the result to Log)</button>
     </div>
     <div class="card">
       <b>Route options (Google)</b>
@@ -193,6 +194,6 @@
 
   <div class="modal" id="modal" hidden><div class="card" id="modalBody"></div></div>
 
-  <script type="module" src="app.js?v=2.8-w0.5.1"></script>
+  <script type="module" src="app.js?v=2.8-w0.5.2"></script>
 </body>
 </html>

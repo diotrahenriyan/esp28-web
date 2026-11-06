@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.1';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.2';
 
-const VERSION = '2.8-w0.5.1';
+const VERSION = '2.8-w0.5.2';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -355,6 +355,47 @@ function loadGoogle(key) {
     setTimeout(() => rej(new Error('Google Maps did not load in 15 s')), 15000);
   });
 }
+// what the Google map got to before it gave up (for the Log; no key, no query strings)
+function googleDiag(el) {
+  const r = el.getBoundingClientRect();
+  const err = el.querySelector('.gm-err-message, .gm-err-title');
+  const paths = {};
+  for (const e of performance.getEntriesByType('resource')) {
+    const u = new URL(e.name);
+    if (!/google|gstatic/.test(u.host)) continue;
+    const k = u.host.replace('.com', '') + u.pathname.split('/').slice(0, 4).join('/');
+    paths[k] = (paths[k] || 0) + 1;
+  }
+  return `Google diag: map ${Math.round(r.width)}x${Math.round(r.height)}, ` +
+    `${el.querySelectorAll('img').length} img, ${el.querySelectorAll('canvas').length} canvas, ` +
+    `version ${(window.google && google.maps && google.maps.version) || '?'}, ` +
+    `error box: ${err ? err.textContent.trim().slice(0, 120) : 'none'}\n  requests: ` +
+    (Object.entries(paths).map(([k, n]) => `${k} x${n}`).join(', ') || 'none');
+}
+// one Routes and one Places request with the key: the exact reply Google gives (status + message)
+async function testKey() {
+  if (!gkey()) { log('Key test: no key set'); return; }
+  log('Key test: start (2 requests)');
+  const show = async (name, r) => {
+    const j = await r.json().catch(() => ({}));
+    const e = j.error || {};
+    log(`Key test ${name}: HTTP ${r.status}` + (r.ok ? ' OK' : ` ${e.status || ''} — ${(e.message || '').slice(0, 200)}`));
+  };
+  try {
+    meter('routeMoto');
+    await show('Routes', await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': gkey(), 'X-Goog-FieldMask': 'routes.distanceMeters' },
+      body: JSON.stringify({ origin: { location: { latLng: { latitude: -6.9147, longitude: 107.6098 } } },
+        destination: { location: { latLng: { latitude: -6.9175, longitude: 107.6191 } } }, travelMode: 'TWO_WHEELER' }) }));
+  } catch (e) { log('Key test Routes: network error ' + e.message); }
+  try {
+    meter('autocomplete');
+    await show('Places', await fetch('https://places.googleapis.com/v1/places:autocomplete', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': gkey() }, body: JSON.stringify({ input: 'Gedung Sate' }) }));
+  } catch (e) { log('Key test Places: network error ' + e.message); }
+}
+window.addEventListener('error', (e) => log('Page error: ' + (e.message || e.type) + (e.filename ? ' @ ' + new URL(e.filename, location.href).host : '')));
+window.addEventListener('unhandledrejection', (e) => log('Unhandled: ' + ((e.reason && e.reason.message) || e.reason)));
 async function googleMap() {
   await loadGoogle(gkey());
   meter('map');
@@ -365,7 +406,8 @@ async function googleMap() {
   // a map that never draws a tile is blank: give it 15 s, then fall back
   let tiles = false;
   google.maps.event.addListenerOnce(map, 'tilesloaded', () => { tiles = true; log('Google map tiles loaded'); });
-  setTimeout(() => { if (!tiles) gmFail('Google map tiles did not load in 15 s'); }, 15000);
+  ['projection_changed', 'bounds_changed', 'idle'].forEach((ev) => google.maps.event.addListenerOnce(map, ev, () => log('Google map event: ' + ev)));
+  setTimeout(() => { if (!tiles) { log(googleDiag(el)); gmFail('Google map tiles did not load in 15 s'); } }, 15000);
   let me = null, dest = null, lines = [], holdT = null;
   const path = (c) => c.map(([x, y]) => ({ lat: y, lng: x }));
   return {
@@ -871,6 +913,7 @@ $('q').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTi
 $('q').oninput = () => { clearTimeout(searchT); if (gkey()) searchT = setTimeout(() => search(false), 400); };
 $('gkey').onchange = (e) => { store.set('gkey', e.target.value.trim()); renderGoogle(); };
 $('btnReload').onclick = () => location.reload();
+$('btnTestKey').onclick = () => { testKey(); };
 ['optMode', 'optTolls', 'optHighways', 'optFerries'].forEach((id) => ($(id).onchange = () => {
   store.set('routeOptions', { mode: $('optMode').value, tolls: $('optTolls').checked, highways: $('optHighways').checked, ferries: $('optFerries').checked });
   if (nav.dest) setDestination(nav.dest);
