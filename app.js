@@ -3,9 +3,9 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.3';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.5.4';
 
-const VERSION = '2.8-w0.5.3';
+const VERSION = '2.8-w0.5.4';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -401,11 +401,12 @@ async function googleMap() {
   meter('map');
   const { Map, Polyline } = await google.maps.importLibrary('maps');
   const { Marker } = await google.maps.importLibrary('marker');
-  // Google writes position:relative onto its container, which on #map (position:fixed; inset:0)
-  // drops the inset and leaves a 0 px tall map. Give Google its own child that fills #map.
+  // Google writes position:relative onto its container, so inset/absolute sizing is lost and the
+  // map collapses to 0 px tall (iPhone diag "393x0"). Size the container with width/height
+  // instead: #map is fixed full-screen, so 100% is a definite size whatever position Google sets.
   const el = document.createElement('div');
   el.id = 'gmap';
-  el.style.cssText = 'position:absolute;inset:0';
+  el.style.cssText = 'width:100%;height:100%';
   $('map').appendChild(el);
   const map = new Map(el, { center: { lat: -6.9147, lng: 107.6098 }, zoom: 13, disableDefaultUI: true, clickableIcons: false, gestureHandling: 'greedy' });
   // a map that never draws a tile is blank: give it 15 s, then fall back
@@ -965,6 +966,7 @@ $('ver').textContent = 'Web version ' + VERSION;
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (!navigator.bluetooth) status('No Bluetooth in this browser. Open this page in Bluefy.', 'bad');
 if (navigator.geolocation) startWatch();
+log('Web version ' + VERSION);
 watchGoogleConsole();
 startMap();
 render();
