@@ -3,11 +3,12 @@
 // LocationStreamService.kt; the wire contract is speedo-idf/main/ble_link_proto.h + nav_lines.tsv.
 import { PROTOCOL, SVC, RX, TX, DEVICE_NAME, LINE_MAX, toHex, fromHex, authText, LineAssembler, chunks,
   locationLine, osrmRouteLine, withRouteId, distanceToLine, metersBetween, RerouteDetector,
-  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender } from './core.js?v=2.8-w0.6.0';
+  APPEARANCE_DEFAULTS, appearanceLine, usesToll, decodePolyline, routeLine, FIELD_MASK, OTA, OTA_MAX, appDesc, otaDecide, plainVersion, OtaSender,
+  parseVersion, compareVersion, channelOf, checkManifest, checkImage, IMAGE_REASONS } from './core.js?v=2.8-w0.7.0';
 import { PROFILES, DEFAULT_PROFILE, UNIT_STATES, bikeConfigLine, bikeLinkLine, bikeRelayLine, bikeQueryLine, captureLine,
-  V as ST_V, P as ST_P, U as ST_U, X as ST_X, N as ST_N } from './bikeunit.js?v=2.8-w0.6.0';
+  V as ST_V, P as ST_P, U as ST_U, X as ST_X, N as ST_N } from './bikeunit.js?v=2.8-w0.7.0';
 
-const VERSION = '2.8-w0.6.0';
+const VERSION = '2.8-w0.7.0';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
@@ -121,6 +122,7 @@ async function connect(register) {
 
 function onDisconnect() {
   link.authed = false;
+  cloud.checked = false; clearTimeout(unit.queryT); clearTimeout(unit.cfgT);
   if (fw.running && fw.sender && fw.sender.state !== 'done') fw.sender.fail('Disconnected');
   log('Disconnected');
   status('The cluster disconnected. Tap Connect cluster.', 'bad');
@@ -161,8 +163,9 @@ async function onLine(line) {
       onLinked();
       break;
     }
-    case 'deviceStatus': link.device = m; renderDetails(); checkUpdated(); renderFirmware(); break;
-    case 'bikeState': unit.state = m; renderChips(); break;
+    case 'deviceStatus': link.device = m; renderDetails(); checkUpdated(); renderFirmware();
+      if (!cloud.checked) { cloud.checked = true; fwCheck(); } break;
+    case 'bikeState': unit.state = m; unit.noRelay = false; clearTimeout(unit.queryT); renderChips(); renderUnitPage(); break;
     case 'bikeFrame': if (!unit.demo) onUnitFrame(m.h); break;
     case 'bikeConfig': unitConfigReply(m); break;
     case 'otaReady': case 'otaAck': case 'otaDone': case 'otaError': otaMessage(m); break;
@@ -195,7 +198,11 @@ async function onLinked() {
   if (nav.line) { link.awaitingRouteId = nav.line.routeId; link.routeQueryAt = Date.now(); await sendLine({ type: 'routeQuery' }); }
   await sendLine(appearanceLine(appearance));
   unit.relayOn = null;   // the cluster starts with the relay off at each connection
+  unit.state = null; unit.noRelay = false;
   await sendLine(bikeQueryLine(), true).catch(() => {});
+  // D21: firmware without the bike unit relay never answers bikeQuery
+  clearTimeout(unit.queryT);
+  unit.queryT = setTimeout(() => { if (linked() && !unit.state) { unit.noRelay = true; log('No bikeState within 3 s: this cluster firmware has no bike unit support'); renderUnitPage(); } }, 3000);
   syncRelay();
 }
 
@@ -730,13 +737,13 @@ function renderSaved() {
   s.forEach((p, i) => {
     const card = document.createElement('div');
     card.className = 'saveditem';
-    card.innerHTML = '<b></b><div class="note"></div><div class="row"><button class="btn">Drive here</button><button class="btn">Rename</button><button class="btn bad">Delete</button></div>';
+    card.innerHTML = '<b></b><div class="note"></div><div class="row"><button class="btn bad">Delete</button><button class="btn push">Rename</button><button class="btn">Drive here</button></div>';
     card.querySelector('b').textContent = p.name;
     card.querySelector('.note').textContent = `${p.latitude.toFixed(5)}, ${p.longitude.toFixed(5)}`;
-    const [go, ren, del] = card.querySelectorAll('button');
+    const [del, ren, go] = card.querySelectorAll('button');
     go.onclick = () => { closePages(); showTab('map'); setDestination({ name: p.name, lat: p.latitude, lon: p.longitude }); };
     ren.onclick = () => askName('Rename place', p.name, (n) => { const a = saved(); a[i].name = n; store.set('saved', a); renderSaved(); });
-    del.onclick = () => confirmBox(`Delete "${p.name}"?`, 'Delete', () => { const a = saved(); a.splice(i, 1); store.set('saved', a); renderSaved(); });
+    del.onclick = () => confirmBox(`Delete "${p.name}"? The saved place is removed from this device.`, 'Delete', () => { const a = saved(); a.splice(i, 1); store.set('saved', a); renderSaved(); }, { danger: true });
     list.appendChild(card);
   });
 }
@@ -798,20 +805,22 @@ function renderFirmware() {
     else if (r === 'current') { v.textContent = 'The cluster already runs this image.'; v.className = 'status'; can = true; }
     else { v.textContent = r === 'rebuild' ? 'Same version, different build: installable.' : 'Newer or different version: installable.'; v.className = 'status ok'; can = true; }
   }
+  $('fwChecked').hidden = !(ok && fw.fromCloud);
   $('btnFwInstall').disabled = !can || !linked() || !link.ota || fw.running;
   if (linked() && !link.ota) $('fwInstalled').textContent += '. This cluster has no update channel.';
 }
 
 $('fwFile').onchange = async (e) => {
   const f = e.target.files[0];
-  fw.image = null; fw.desc = null;
+  fw.image = null; fw.desc = null; fw.fromCloud = null;
+  if (cloud.state === 'ready') cloud.state = cloud.offer ? 'available' : 'current';
   if (f) {
     const bytes = new Uint8Array(await f.arrayBuffer());
     const d = appDesc(bytes);
     if (!d) { status('This file is not an ESP32 firmware image.', 'bad'); }
     else { fw.image = bytes; fw.desc = d; fw.name = f.name; fw.target = d.project === 'updater' ? 'updater' : 'app'; }
   }
-  renderFirmware();
+  renderFirmware(); renderCloud();
 };
 
 $('btnFwInstall').onclick = () => confirmBox(
@@ -884,7 +893,8 @@ async function pumpOta() {
   }
   renderFirmware();
 }
-$('btnFwCancel').onclick = () => { if (fw.sender && fw.running) fw.sender.fail('Cancelled'); };
+$('btnFwCancel').onclick = () => confirmBox('Cancel the update? The cluster keeps its current firmware; the download starts again next time.', 'Cancel update',
+  () => { if (fw.sender && fw.running) fw.sender.fail('Cancelled'); }, { danger: true });
 
 // after the restart: what the cluster runs now (UpdateCheck.restart)
 function checkUpdated() {
@@ -900,11 +910,152 @@ function checkUpdated() {
   else status(`The cluster runs ${v}`, 'warn');
 }
 
+
+// ---------- firmware from the cloud (PRD D17–D19, TRD §14): firmware/<channel>/ on this same site ----------
+// state: off | unknown | checking | current | available | none | offline | downloading | verifying | ready | refused | dlfail
+const cloud = { state: 'off', channel: null, offer: null, previous: null, msg: '', pct: 0, seq: 0, dl: null, checked: false };
+const fwUrl = (ch, name) => new URL('firmware/' + ch + '/' + name, location.href).href;
+const fwTest = () => store.get('fwTest', false) === true;
+
+// one manifest: null when nothing is published (404) or the file has the wrong shape; throws when offline
+async function getManifest(ch, name) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 10000);
+  try {
+    const r = await fetch(fwUrl(ch, name) + '?t=' + Date.now(), { cache: 'no-store', signal: ctl.signal });
+    if (r.status === 404) { log(`Firmware ${ch}/${name}: nothing published`); return null; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const m = checkManifest(await r.json().catch(() => null));
+    if (!m || channelOf(m.version) !== ch) { log(`Firmware ${ch}/${name}: not a valid manifest, ignored`); return null; }
+    return m;
+  } finally { clearTimeout(t); }
+}
+
+async function fwCheck() {
+  if (fw.running || ['checking', 'downloading', 'verifying', 'ready'].includes(cloud.state)) return;
+  const seq = ++cloud.seq;
+  cloud.offer = null; cloud.previous = null;
+  if (!linked() || !link.device) { cloud.state = 'off'; renderCloud(); return; }
+  const running = plainVersion(link.device.clusterVersion);
+  const ch = channelOf(running);
+  cloud.channel = ch;
+  if (!ch) { cloud.state = 'unknown'; log(`Firmware check: cannot read the version "${running}"; choose a file`); renderCloud(); return; }
+  cloud.state = 'checking'; renderCloud();
+  try {
+    const [rel, prev, test] = await Promise.all([getManifest(ch, 'manifest.json'), getManifest(ch, 'manifest-previous.json'),
+      fwTest() ? getManifest(ch, 'manifest-test.json') : null]);
+    if (seq !== cloud.seq) return;
+    // only a newer version of the same channel is offered; a trial only with Show test builds on
+    const newer = [rel, test].filter((m) => m && compareVersion(m.version, running) === 1)
+      .sort((a, b) => compareVersion(b.version, a.version));
+    cloud.offer = newer[0] || null;
+    cloud.previous = prev && prev.version !== running ? prev : null;
+    cloud.state = cloud.offer ? 'available' : (rel || test) ? 'current' : 'none';
+    log(`Firmware check (${ch}): ${cloud.offer ? cloud.offer.version + ' available' : 'no newer version'}`);
+  } catch (e) {
+    if (seq !== cloud.seq) return;
+    cloud.state = 'offline'; log('Firmware check failed: ' + (e.name === 'AbortError' ? 'no answer in 10 s' : e.message));
+  }
+  renderCloud();
+}
+
+// stream the image with progress from the manifest size; refuse above it; then the §14.5 checks
+async function fwDownload(m) {
+  if (fw.running || !m) return;
+  if (cloud.dl) cloud.dl.abort();
+  const ctl = new AbortController();
+  cloud.dl = ctl; cloud.state = 'downloading'; cloud.pct = 0; cloud.msg = '';
+  fw.image = null; fw.desc = null; fw.fromCloud = null; $('fwFile').value = '';
+  renderCloud(); renderFirmware();
+  const t0 = Date.now(); let last = t0, why = '';
+  const watch = setInterval(() => {
+    const n = Date.now();
+    if (n - last > 15000) { why = 'no data for 15 s'; ctl.abort(); } else if (n - t0 > 120000) { why = 'over 120 s'; ctl.abort(); }
+  }, 1000);
+  try {
+    const r = await fetch(fwUrl(cloud.channel, m.file), { cache: 'no-store', signal: ctl.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const buf = new Uint8Array(m.size);
+    let got = 0;
+    const rd = r.body.getReader();
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      if (got + value.length > m.size) { ctl.abort(); cloud.state = 'refused'; cloud.msg = IMAGE_REASONS.size; log('Firmware download refused: larger than published'); return; }
+      buf.set(value, got); got += value.length; last = Date.now();
+      cloud.pct = Math.floor((got * 100) / m.size); renderDl();
+    }
+    cloud.state = 'verifying'; renderCloud();
+    const res = await checkImage(buf.subarray(0, got), m, OTA_MAX.app);
+    if (!res.ok) { cloud.state = 'refused'; cloud.msg = res.reason; log('Firmware download refused: ' + res.code); return; }
+    fw.image = buf; fw.desc = res.desc; fw.name = m.file; fw.target = 'app'; fw.fromCloud = m;
+    cloud.state = 'ready';
+    log(`Firmware ${m.version} downloaded and checked`);
+  } catch (e) {
+    if (cloud.dl !== ctl) return;
+    if (ctl.signal.aborted && !why) { cloud.state = cloud.offer ? 'available' : 'current'; log('Firmware download cancelled'); }
+    else { cloud.state = 'dlfail'; log('Firmware download failed: ' + (why || e.message)); }
+  } finally {
+    clearInterval(watch);
+    if (cloud.dl === ctl) cloud.dl = null;
+    renderCloud(); renderFirmware();
+  }
+}
+
+function renderDl() { $('fwDlBar').style.width = cloud.pct + '%'; setText('fwDlStep', cloud.state === 'verifying' ? 'Checking the file…' : `Downloading ${cloud.pct}%`); }
+
+const CLOUD_TEXT = {
+  off: () => 'Connect the cluster to check for updates.',
+  unknown: () => 'This cluster firmware has an older version name and cannot be checked online. Choose a file instead.',
+  checking: () => 'Checking for updates…',
+  current: () => `The cluster runs the newest firmware (${plainVersion(link.device && link.device.clusterVersion)}).`,
+  available: () => `Firmware ${cloud.offer.version} is available.`,
+  none: () => `No firmware is published for this cluster (channel ${cloud.channel}). Choose a file instead.`,
+  offline: () => 'Could not check for updates. Choose a file instead.',
+  downloading: () => '', verifying: () => '',
+  ready: () => `Firmware ${fw.fromCloud ? fw.fromCloud.version : ''} is ready to install.`,
+  refused: () => cloud.msg,
+  dlfail: () => 'Could not download the firmware. Choose a file instead.',
+};
+const CLOUD_CLASS = { refused: 'bad', offline: 'warn', dlfail: 'warn', unknown: 'warn', available: 'ok', ready: 'ok' };
+function renderCloud() {
+  if (!$('fwCloud')) return;
+  const st = cloud.state;
+  const busy = st === 'downloading' || st === 'verifying';
+  $('fwCloud').hidden = busy;
+  if (!busy) { setText('fwCloud', CLOUD_TEXT[st](cloud)); $('fwCloud').className = 'status ' + (CLOUD_CLASS[st] || ''); }
+  $('fwDl').hidden = !busy; if (busy) renderDl();
+  $('btnFwDlCancel').hidden = st !== 'downloading';
+  const canUpdate = !!cloud.offer && !fw.running && ['available', 'refused', 'dlfail'].includes(st);
+  $('fwCloudRow').hidden = !canUpdate;
+  const pv = cloud.previous && !fw.running && !busy && st !== 'ready' && linked();
+  $('btnFwPrevious').hidden = !pv;
+  if (pv) setText('btnFwPrevious', `Install previous version ${cloud.previous.version}`);
+  $('fwTest').checked = fwTest();
+  // banner and dots: an offered version that is not installed and not dismissed
+  const dismissed = store.get('fwDismissed', '');
+  const show = !!cloud.offer && linked() && cloud.offer.version !== dismissed;
+  const bannerOn = show && !fw.running && st === 'available';
+  $('fwBanner').hidden = !bannerOn;
+  if (bannerOn) setText('fwBannerText', `Firmware ${cloud.offer.version} is available.`);
+  $('setupDot').hidden = !show; $('fwDot').hidden = !show;
+}
+function fwUpdateNow() { const m = cloud.offer; if (!m) return; openPage('pgFirmware'); fwDownload(m); }
+$('btnFwUpdate').onclick = fwUpdateNow;
+$('btnFwBannerUpdate').onclick = fwUpdateNow;
+$('btnFwNotNow').onclick = () => { if (cloud.offer) { store.set('fwDismissed', cloud.offer.version); log(`Firmware ${cloud.offer.version}: Not now`); } renderCloud(); };
+$('btnFwDlCancel').onclick = () => { if (cloud.dl) cloud.dl.abort(); };
+$('btnFwPrevious').onclick = () => {
+  const m = cloud.previous; if (!m) return;
+  confirmBox(`Install the older firmware ${m.version}? The cluster restarts twice and then runs the older version.`, 'Download older version', () => fwDownload(m));
+};
+$('fwTest').onchange = (e) => { store.set('fwTest', e.target.checked); if (!['downloading', 'verifying', 'ready'].includes(cloud.state)) { cloud.state = 'off'; fwCheck(); } };
+
 // ---------- Setup boxes (were pushed pages), dialogs ----------
 function openPage(id) {
   showTab('setup');
   if (id === 'pgSaved') renderSaved(); if (id === 'pgCluster') renderDetails(); if (id === 'pgUnit') renderUnitPage(); if (id === 'pgCaptures') renderCaptures();
-  if (id === 'pgFirmware') renderFirmware(); if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance();
+  if (id === 'pgFirmware') { renderFirmware(); fwCheck(); } if (id === 'pgGoogle') renderGoogle(); if (id === 'pgAppearance' || id === 'pgDebug') renderAppearance();
   const el = $(id); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' });
   render();
 }
@@ -915,9 +1066,10 @@ function modal(build) {
   build(body, () => { $('modal').hidden = true; });
   $('modal').hidden = false;
 }
-function confirmBox(text, okLabel, ok) {
+// D22: the action on the left, Cancel at the right edge (a slip of the right thumb lands on Cancel)
+function confirmBox(text, okLabel, ok, { danger = false } = {}) {
   modal((b, close) => {
-    b.innerHTML = '<div></div><button class="btn pri"></button> <button class="btn">Cancel</button>';
+    b.innerHTML = `<div></div><div class="row"><button class="btn ${danger ? 'bad' : 'pri'}"></button><button class="btn push">Cancel</button></div>`;
     b.firstChild.textContent = text;
     const [y, n] = b.querySelectorAll('button');
     y.textContent = okLabel; y.onclick = () => { close(); ok(); };
@@ -960,7 +1112,7 @@ async function render() {
   $('btnGps').className = 'btn' + (gps.sharing ? ' on' : '');
   $('btnGps').disabled = !linked();
   $('btnSend').disabled = !linked() || !nav.choices.length;
-  $('btnStop').hidden = !(linked() && nav.line);
+  $('stopRow').hidden = !(linked() && nav.line);
   $('btnSimulate').disabled = !nav.choices.length || !linked();
   $('simHint').hidden = nav.choices.length > 0;
   $('pairState').textContent = reg ? 'This device is registered with a cluster.' : 'Not registered yet.';
@@ -968,6 +1120,7 @@ async function render() {
   const label = $('btnLink').textContent;
   document.querySelectorAll('.js-link').forEach((b) => { b.textContent = label; b.className = 'btn js-link' + (on && link.authed ? ' on' : ''); });
   renderChips();
+  renderCloud();
 }
 
 
@@ -1003,7 +1156,7 @@ function syncRelay() {
 function unitStateName() {
   if (unit.demo) return 'Demo data';
   if (!linked()) return 'Off';
-  if (!unit.state) return 'No reply (needs firmware 0.1.5)';
+  if (!unit.state) return unit.noRelay ? 'No reply' : 'Asking the cluster…';
   return UNIT_STATES[unit.state.state] || unit.state.state;
 }
 function rate() { const now = Date.now(); let n = 0; for (const t of unit.rateFrames) if (now - t < 5000) n++; return n / 5; }
@@ -1119,7 +1272,16 @@ function renderUnitPage() {
   const html = rows.map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
   if ($('unitKv').innerHTML !== html) $('unitKv').innerHTML = html;
   $('unitLinkOn').checked = !!(s.state && s.state !== 'off');
-  $('unitLinkOn').disabled = !linked();
+  // D21: firmware that never answered bikeQuery cannot store the key
+  const noFw = linked() && unit.noRelay && !unit.demo;
+  $('unitLinkOn').disabled = !linked() || noFw;
+  $('btnKeySave').disabled = noFw; $('btnKeyErase').disabled = noFw;
+  $('unitNoFw').hidden = !noFw;
+  if (noFw) {
+    const v = link.device ? plainVersion(link.device.clusterVersion) : '';
+    const lab = unit.profile.key.label, kname = lab.charAt(0).toLowerCase() + lab.slice(1);
+    setText('unitNoFwText', `This cluster firmware${v ? ` (${v})` : ''} cannot store the ${kname}. Update the cluster first.`);
+  }
   $('demoOn').checked = unit.demo;
   setText('keyLabel', unit.profile.key.label);
   setText('keyHelp', `${unit.profile.key.help} It is sent once to the cluster and stored there. It is never shown again and never part of the website.`);
@@ -1127,6 +1289,7 @@ function renderUnitPage() {
   $('unitKey').setAttribute('aria-label', unit.profile.key.label);
 }
 function unitConfigReply(m) {
+  clearTimeout(unit.cfgT);
   const k = unit.profile.key.label;
   $('unitKeyMsg').textContent = !m.ok ? `The cluster did not accept the ${k.toLowerCase()}.` : m.keySet ? `${k} stored on the cluster.` : `${k} erased from the cluster.`;
   sendLine(bikeQueryLine(), true).catch(() => {});
@@ -1189,15 +1352,15 @@ async function renderCaptures() {
   host.textContent = '';
   for (const c of all) {
     const row = document.createElement('div'); row.className = 'capitem';
-    row.innerHTML = '<span></span><button class="btn">Download</button><button class="btn bad">Delete</button>';
+    row.innerHTML = '<span></span><div class="row"><button class="btn bad">Delete</button><button class="btn push">Download</button></div>';
     row.firstChild.textContent = `${c.id} · ${nf(c.frames)} messages${c.demo ? ' · demo data' : ''}`;
-    const [dl, del] = row.querySelectorAll('button');
+    const [del, dl] = row.querySelectorAll('button');
     dl.onclick = () => downloadCapture(c.id);
-    del.onclick = () => confirmBox(`Delete ${c.id}?`, 'Delete', async () => {
+    del.onclick = () => confirmBox(`Delete ${c.id}? The recorded messages are removed from this device.`, 'Delete', async () => {
       const keys = await req((await capStore('chunks', 'readonly')).index('sid').getAllKeys(c.id));
       const st = await capStore('chunks', 'readwrite'); keys.forEach((k) => st.delete(k));
       await req((await capStore('sessions', 'readwrite')).delete(c.id)); renderCaptures();
-    });
+    }, { danger: true });
     host.appendChild(row);
   }
 }
@@ -1226,7 +1389,7 @@ function showTab(tab) {
   try { localStorage.setItem('esp28.tab', JSON.stringify(tab)); } catch (_) {}
   syncRelay();
   if (tab === 'map') startMap().catch((e) => status('Map failed: ' + e.message, 'bad'));
-  if (tab === 'setup') { renderDetails(); renderUnitPage(); renderCaptures(); renderSaved(); renderGoogle(); renderAppearance(); renderFirmware(); }
+  if (tab === 'setup') { renderDetails(); renderUnitPage(); renderCaptures(); renderSaved(); renderGoogle(); renderAppearance(); renderFirmware(); fwCheck(); }
   unit.rawDirty = true; tick();
 }
 // one timer, and only the visible tab is drawn (about 4 times a second)
@@ -1261,25 +1424,25 @@ $('btnGps').onclick = () => setSharing(!gps.sharing);
 $('btnSend').onclick = () => sendSelected(false);
 $('btnSave').onclick = saveCurrent;
 $('btnClear').onclick = () => { nav.dest = null; nav.choices = []; $('destBox').hidden = true; $('q').value = ''; if (M) { M.routes([], 0, selectRoute); M.dest(null); } render(); };
-$('btnStop').onclick = async () => {
+$('btnStop').onclick = () => confirmBox('Stop navigation? The cluster clears the route.', 'Stop navigation', async () => {
   await sendLine({ type: 'stop' }).catch(() => {});
   nav.line = null; nav.active = null; store.set('route', null);
   status('Navigation stopped', 'ok'); render();
-};
+}, { danger: true });
 $('btnRegister').onclick = () => { closePages(); connect(true); };
 $('btnForget').onclick = () => confirmBox('Erase this phone\'s pairing data? You will need to register again.', 'Erase', async () => {
   await kv('bikePub', null); await kv('phoneKey', null); log('Pairing data erased'); render();
-});
+}, { danger: true });
 $('btnPreviewMode').onclick = () => { previewDay = !previewDay; renderAppearance(); };
 $('slRoad').oninput = (e) => { appearance[previewDay ? 'dayRoad' : 'nightRoad'] = +e.target.value; renderAppearance(); };
 $('slTerrain').oninput = (e) => { appearance[previewDay ? 'dayTerrain' : 'nightTerrain'] = +e.target.value; renderAppearance(); };
 $('slRoad').onchange = $('slTerrain').onchange = saveAppearance;
-$('btnResetMode').onclick = () => {
+$('btnResetMode').onclick = () => confirmBox(`Reset ${previewDay ? 'day' : 'night'} brightness to the defaults?`, 'Reset', () => {
   const D = APPEARANCE_DEFAULTS;
   if (previewDay) Object.assign(appearance, { dayRoad: D.dayRoad, dayTerrain: D.dayTerrain });
   else Object.assign(appearance, { nightRoad: D.nightRoad, nightTerrain: D.nightTerrain });
   renderAppearance(); saveAppearance();
-};
+}, { danger: true });
 $('btnClusterTheme').onclick = () => { appearance.clusterThemeMode = (appearance.clusterThemeMode + 1) % 3; renderAppearance(); saveAppearance(); };
 $('slSim').oninput = (e) => { appearance.simulationSpeedKph = +e.target.value; renderAppearance(); };
 $('slSim').onchange = saveAppearance;
@@ -1303,16 +1466,21 @@ $('unitProfile').value = unit.profile.id;
 $('unitProfile').onchange = (e) => setProfile(e.target.value);
 $('unitLinkOn').onchange = (e) => { if (!linked()) return; sendLine(bikeLinkLine(e.target.checked)).then(() => sendLine(bikeQueryLine(), true)).catch(() => {}); };
 $('demoOn').onchange = (e) => setDemo(e.target.checked);
+$('btnUnitToFw').onclick = () => openPage('pgFirmware');
 $('btnKeyShow').onclick = () => { const i = $('unitKey'); i.type = i.type === 'password' ? 'text' : 'password'; $('btnKeyShow').textContent = i.type === 'password' ? 'Show' : 'Hide'; };
 $('btnKeySave').onclick = () => {
   const k = unit.profile.key, v = k.normalize($('unitKey').value);
   if (!k.valid(v)) { $('unitKeyMsg').textContent = `The ${k.label.toLowerCase()} must be ${k.hint}.`; return; }
   if (!linked()) { $('unitKeyMsg').textContent = 'Connect the cluster first.'; return; }
-  sendLine(bikeConfigLine(unit.profile.id, v), true).then(() => { $('unitKey').value = ''; $('unitKeyMsg').textContent = 'Sent. Waiting for the cluster…'; }).catch((e) => { $('unitKeyMsg').textContent = 'Not sent: ' + e.message; });
+  sendLine(bikeConfigLine(unit.profile.id, v), true).then(() => {
+    $('unitKey').value = ''; $('unitKeyMsg').textContent = 'Sent. Waiting for the cluster…';
+    clearTimeout(unit.cfgT);
+    unit.cfgT = setTimeout(() => { $('unitKeyMsg').textContent = 'Not stored: the cluster did not answer.'; }, 5000);
+  }).catch((e) => { $('unitKeyMsg').textContent = 'Not sent: ' + e.message; });
 };
 $('btnKeyErase').onclick = () => confirmBox(`Erase the ${unit.profile.key.label.toLowerCase()} from the cluster? The cluster cannot log in to the bike unit until you send it again.`, 'Erase', () => {
   if (linked()) sendLine(bikeConfigLine(unit.profile.id, ''), true).catch(() => {});
-});
+}, { danger: true });
 $('themeSel').value = store.get('theme', 'system');
 $('themeSel').onchange = (e) => { store.set('theme', e.target.value); applyTheme(e.target.value); };
 applyTheme(store.get('theme', 'system'));
@@ -1321,8 +1489,11 @@ if (/[?&]test\b/.test(location.search)) {
   const sent = [], dec = new TextDecoder();
   window.__esp28 = { onLine, sent,
     // a stand-in link: what the app writes is collected as text lines in sent[]
-    fakeLink() { let buf = ''; link.dev = { gatt: { connected: true, disconnect() {} } }; link.authed = true;
-      link.rx = { writeValueWithResponse: async (c) => { buf += dec.decode(c); let i; while ((i = buf.indexOf('\n')) >= 0) { sent.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); } } };
+    // { ota: true } adds the update channel: each frame goes to __esp28.onOta(frame); each line also to __esp28.onSent(msg)
+    fakeLink({ ota = false } = {}) { let buf = ''; link.dev = { gatt: { connected: true, disconnect() {} } }; link.authed = true;
+      link.rx = { writeValueWithResponse: async (c) => { buf += dec.decode(c); let i; while ((i = buf.indexOf('\n')) >= 0) {
+        const m = JSON.parse(buf.slice(0, i)); sent.push(m); buf = buf.slice(i + 1); if (window.__esp28.onSent) window.__esp28.onSent(m); } } };
+      link.ota = ota ? { writeValueWithoutResponse: async (f) => { if (window.__esp28.onOta) window.__esp28.onOta(new Uint8Array(f)); } } : null;
       onLinked(); } };
 }
 

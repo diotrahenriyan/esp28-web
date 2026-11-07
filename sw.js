@@ -1,5 +1,5 @@
 // Network first, cache as fallback: always the newest version when online, still opens offline.
-const CACHE = 'esp28-w0.6.0';
+const CACHE = 'esp28-w0.7.0';
 const FILES = ['./', 'index.html', 'app.js', 'core.js', 'bikeunit.js', 'app.css', 'manifest.webmanifest', 'icon.svg', 'leaflet/leaflet.js', 'leaflet/leaflet.css', 'leaflet/images/marker-icon.png', 'leaflet/images/marker-icon-2x.png', 'leaflet/images/marker-shadow.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) =>
@@ -7,6 +7,8 @@ self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) =>
 self.addEventListener('fetch', (e) => {
   const u = new URL(e.request.url);
   if (u.origin !== location.origin || e.request.method !== 'GET') return;
+  // firmware images and manifests go to the network directly and are never cached (TRD §14.3.3)
+  if (u.pathname.includes('/firmware/')) return;
   e.respondWith(fetch(e.request, { cache: 'no-cache' }).then((r) => { const c = r.clone(); caches.open(CACHE).then((x) => x.put(e.request, c)); return r; })
     .catch(() => caches.match(e.request, { ignoreSearch: true })));
 });

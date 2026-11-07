@@ -1,0 +1,23 @@
+{
+  "comment": "Shared version table (TRD §14.4). An identical copy lives in esp28-firmware speedo-idf/tests/release_web/versions.json; keep both equal.",
+  "valid": [
+    { "v": "2.8-0.1.4", "channel": "main", "trial": null },
+    { "v": "2.8-0.1.6-fz", "channel": "fz", "trial": null },
+    { "v": "2.8-0.1.7-fzt1", "channel": "fz", "trial": 1 },
+    { "v": "2.8-0.1.7-fz", "channel": "fz", "trial": null },
+    { "v": "2.8-0.1.5-t2", "channel": "main", "trial": 2 },
+    { "v": "2.8-10.20.30", "channel": "main", "trial": null }
+  ],
+  "invalid": ["v2.8-0.1.3", "2.8-0.1.4-", "2.8-0.1", "2.8-0.1.7-fzt", "2.8-0.1.7-FZ", "2.9-0.1.4", "2.8-0.1.7-fzt12345", "2.8-0.1.4 ", ""],
+  "order": [
+    ["2.8-0.1.7-fzt1", "2.8-0.1.7-fz", -1],
+    ["2.8-0.1.6-fz", "2.8-0.1.7-fzt1", -1],
+    ["2.8-0.1.7-fzt1", "2.8-0.1.7-fzt2", -1],
+    ["2.8-0.1.7-fz", "2.8-0.1.7-fz", 0],
+    ["2.8-0.1.10", "2.8-0.1.9", 1],
+    ["2.8-0.1.4", "2.8-0.1.5-t1", -1],
+    ["2.8-0.1.5", "2.8-0.1.5-t1", 1],
+    ["2.8-0.1.4", "2.8-0.1.6-fz", null],
+    ["2.8-0.1.7-fz", "2.8-0.1.6", null]
+  ]
+}
