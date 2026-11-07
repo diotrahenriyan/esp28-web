@@ -292,3 +292,55 @@ export class OtaSender {
   }
   fail(reason) { if (this.state === 'done' || this.state === 'failed') return; this.state = 'failed'; this.error = reason; }
 }
+
+// ---- firmware from the cloud (TRD §14.4, §14.2, §14.5) ----
+// 2.8-X.Y.Z plus an optional bike tag: bike letters, then t<n> for a trial build. No tag = main.
+const VERSION_RE = /^2\.8-(\d+)\.(\d+)\.(\d+)(?:-([a-z]*?)(?:t(\d+))?)?$/;
+export const VERSION_MAX = 15;   // the cluster's install record
+export function parseVersion(s) {
+  if (typeof s !== 'string' || s.length > VERSION_MAX) return null;
+  const m = VERSION_RE.exec(s);
+  if (!m) return null;
+  if (s.includes('-', 4) && !m[4] && m[5] === undefined) return null;   // "2.8-0.1.4-" has an empty tag
+  const bike = m[4] || '';
+  if (bike.endsWith('t')) return null;                                  // bike letters never end in t
+  return { major: '2.8', x: +m[1], y: +m[2], z: +m[3], bike, trial: m[5] === undefined ? null : +m[5] };
+}
+export function channelOf(s) { const p = parseVersion(s); return p ? (p.bike || 'main') : null; }
+// -1 / 0 / 1 within one channel; null when unparseable or the channels differ (never offered)
+export function compareVersion(a, b) {
+  const p = parseVersion(a), q = parseVersion(b);
+  if (!p || !q || p.bike !== q.bike) return null;
+  for (const k of ['x', 'y', 'z']) if (p[k] !== q[k]) return p[k] < q[k] ? -1 : 1;
+  const r = (v) => (v.trial === null ? Infinity : v.trial);   // a release is newer than its trials
+  return r(p) === r(q) ? 0 : (r(p) < r(q) ? -1 : 1);
+}
+// manifest as written by ota_publish.sh; null when any field has the wrong shape
+export function checkManifest(m) {
+  if (!m || typeof m !== 'object' || m.target !== 'app') return null;
+  if (!parseVersion(m.version) || !/^[0-9a-f]{16}$/.test(m.build || '') || !/^[0-9a-f]{64}$/.test(m.sha256 || '')) return null;
+  if (!Number.isInteger(m.size) || m.size <= 0 || typeof m.file !== 'string' || !/^speedo-[0-9A-Za-z.\-]+\.bin$/.test(m.file)) return null;
+  return { target: 'app', version: m.version, build: m.build, size: m.size, sha256: m.sha256, file: m.file };
+}
+export const IMAGE_REASONS = {
+  size: 'The downloaded file does not match the published one (size). Nothing was sent to the cluster.',
+  sha256: 'The downloaded file does not match the published one (SHA-256). Nothing was sent to the cluster.',
+  kind: 'The downloaded file is not an ESP32 firmware image. Nothing was sent to the cluster.',
+  updater: 'The downloaded file is an updater, not cluster firmware. Nothing was sent to the cluster.',
+  version: 'The downloaded file does not match the published one (version). Nothing was sent to the cluster.',
+  build: 'The downloaded file does not match the published one (build). Nothing was sent to the cluster.',
+  large: 'The downloaded file is too large for the cluster. Nothing was sent to the cluster.',
+};
+// checks in the order of TRD §14.5; only { ok: true } may reach the cluster
+export async function checkImage(bytes, manifest, maxApp = OTA_MAX.app) {
+  const no = (k) => ({ ok: false, reason: IMAGE_REASONS[k], code: k });
+  if (bytes.length !== manifest.size) return no('size');
+  if (toHex(await crypto.subtle.digest('SHA-256', bytes)) !== manifest.sha256) return no('sha256');
+  const d = appDesc(bytes);
+  if (!d) return no('kind');
+  if (d.project === 'updater') return no('updater');
+  if (d.version !== manifest.version) return no('version');
+  if (d.build !== manifest.build) return no('build');
+  if (bytes.length > maxApp) return no('large');
+  return { ok: true, desc: d };
+}

@@ -17,6 +17,8 @@ pre { white-space:pre-wrap; margin:0; }
 .note { color:var(--mut); font-size:13px; margin:6px 0; }
 .row { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; align-items:center; } .row input:not([type=checkbox]) { flex:1 1 160px; }
 .grow { flex:1; }
+/* D22: a red button sits at the left of its row; the first safe button after it is pushed to the right, also when the row wraps */
+.push { margin-left:auto; }
 
 /* header, status, tabs */
 .hdr { position:sticky; top:0; z-index:20; display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; padding:8px 10px;
@@ -30,6 +32,9 @@ pre { white-space:pre-wrap; margin:0; }
 .tabs button { flex:0 0 auto; min-height:44px; padding:0 14px; background:none; border:0; border-bottom:2px solid transparent; color:var(--mut); cursor:pointer; }
 .tabs button.on { color:var(--fg); border-bottom-color:var(--pri); font-weight:600; }
 .status { margin:8px 10px 0; padding:6px 10px; border-left:3px solid var(--line); background:var(--box); font-size:13px; }
+.banner { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:8px 10px 0; padding:6px 10px; border-left:3px solid var(--pri); background:var(--box); font-size:13px; }
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--bad); margin-left:6px; vertical-align:middle; }
+.linkbtn { display:block; min-height:44px; padding:0; border:0; background:none; color:var(--pri); text-decoration:underline; cursor:pointer; text-align:left; }
 .status.ok { border-color:var(--ok); } .status.warn { border-color:var(--warn); } .status.bad { border-color:var(--bad); color:var(--bad); }
 main { padding:8px 10px max(16px, env(safe-area-inset-bottom)); }
 .tab { display:none; }
@@ -84,7 +89,7 @@ label.slider { display:block; margin-top:8px; font-size:14px; }
 .preview { height:60px; position:relative; overflow:hidden; border:1px solid var(--line); margin:6px 0; }
 .preview i { position:absolute; left:-10%; right:-10%; top:26px; height:6px; transform:rotate(-8deg); }
 .capitem { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:6px 0; border-top:1px solid var(--line); font-size:13px; }
-.capitem > span { flex:1 1 180px; overflow-wrap:anywhere; }
+.capitem > span { flex:1 1 100%; overflow-wrap:anywhere; } .capitem > .row { flex:1 1 100%; margin:0; }
 .saveditem { padding:6px 0; border-top:1px solid var(--line); }
 
 /* map: map and panel stacked on phones, side by side from tablet width */
@@ -102,6 +107,7 @@ label.slider { display:block; margin-top:8px; font-size:14px; }
 .modal { position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; padding:16px; }
 .modal .box { width:100%; max-width:420px; }
 .modal .box button { margin-top:6px; }
+.modal .box .row { margin-top:10px; }
 
 /* tablet and laptop */
 @media (min-width: 600px) { .cells { grid-template-columns:repeat(4, minmax(0, 1fr)); } .cell .v { font-size:34px; } }

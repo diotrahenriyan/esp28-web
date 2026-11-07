@@ -26,7 +26,7 @@ await pg.waitForTimeout(500);
 const sent = () => pg.evaluate(() => window.__esp28.sent.map((m) => ({ ...m })));
 const line = (o) => pg.evaluate((s) => window.__esp28.onLine(s), JSON.stringify(o));
 const frame = (expr) => pg.evaluate(async (e) => {
-  const m = await import('./bikeunit.js?v=2.8-w0.6.0'); const hx = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  const m = await import('./bikeunit.js?v=2.8-w0.7.0'); const hx = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
   // eslint-disable-next-line no-new-func
   const f = new Function('m', 'return ' + e)(m); window.__esp28.onLine(JSON.stringify({ type: 'bikeFrame', t: 1, h: hx(f) }));
 }, expr);
@@ -73,6 +73,45 @@ check('bikeConfig reply shown', /stored on the cluster/.test(await pg.textConten
 await pg.click('#unitLinkOn'); await pg.waitForTimeout(200);
 s = await sent();
 check('switch sends bikeLink', s.some((m) => m.type === 'bikeLink'));
+
+// D21: bikeConfig reply missing for 5 s → "Not stored"; meanwhile a recording runs to prove captures never hold the key
+const KEY2 = 'fedcba9876543210fedcba9876543210';
+await pg.click('#btnRecord');
+await pg.fill('#unitKey', KEY2); await pg.click('#btnKeySave'); await pg.waitForTimeout(4500);
+check('D21: no "Not stored" before 5 s', (await pg.textContent('#unitKeyMsg')) === 'Sent. Waiting for the cluster…', await pg.textContent('#unitKeyMsg'));
+await pg.waitForTimeout(800);
+check('D21: no bikeConfig reply in 5 s → "Not stored: the cluster did not answer."', (await pg.textContent('#unitKeyMsg')) === 'Not stored: the cluster did not answer.', await pg.textContent('#unitKeyMsg'));
+await frame('m.liveFrame(m.demoValues(3))');
+await pg.click('#btnRecord'); await pg.waitForTimeout(600);
+const where = await pg.evaluate(async (k) => {
+  const ls = Object.keys(localStorage).map((x) => x + '=' + localStorage.getItem(x)).join('\n');
+  const dump = (name, stores) => new Promise((ok) => { const r = indexedDB.open(name); r.onsuccess = () => {
+    const db = r.result; const names = stores.filter((x) => db.objectStoreNames.contains(x)); if (!names.length) { ok(''); return; }
+    const tx = db.transaction(names, 'readonly'); const out = [];
+    names.forEach((n) => { const q = tx.objectStore(n).getAll(); const kq = tx.objectStore(n).getAllKeys(); q.onsuccess = () => out.push(JSON.stringify(q.result, (kk, v) => (v instanceof CryptoKey ? '[key]' : v))); kq.onsuccess = () => out.push(JSON.stringify(kq.result)); });
+    tx.oncomplete = () => ok(out.join('\n')); }; r.onerror = () => ok(''); });
+  const idb = (await dump('esp28', ['kv'])) + (await dump('esp28-captures', ['sessions', 'chunks']));
+  const logT = document.getElementById('log').textContent;
+  return { ls: ls.includes(k), idb: idb.includes(k), log: logT.includes(k), caps: /chunks|[0-9a-f]{20}/.test(idb) };
+}, KEY2);
+check('key never in localStorage, IndexedDB, Log or captures', !where.ls && !where.idb && !where.log && where.caps, JSON.stringify(where));
+
+// D21: a cluster that never answers bikeQuery (firmware without the relay)
+await pg.evaluate(() => window.__esp28.fakeLink());
+await line({ type: 'deviceStatus', clusterVersion: '2.8-0.1.6-fz', build: '538bb06a5', updaterVersion: '2.8-upd-1.0.0' });
+await pg.waitForTimeout(2500);
+check('D21: Send still enabled before 3 s', !(await pg.isDisabled('#btnKeySave')) && await pg.isHidden('#unitNoFw'));
+await pg.waitForTimeout(800);
+const noFw = await pg.evaluate(() => ({ text: document.getElementById('unitNoFwText').textContent, shown: !document.getElementById('unitNoFw').hidden,
+  send: document.getElementById('btnKeySave').disabled, erase: document.getElementById('btnKeyErase').disabled, link: document.getElementById('unitLinkOn').disabled,
+  state: document.getElementById('pillUnit').textContent }));
+check('D21: no bikeState in 3 s → message with the version and the profile key name',
+  noFw.shown && noFw.text === 'This cluster firmware (2.8-0.1.6-fz) cannot store the phone ID. Update the cluster first.', noFw.text);
+check('D21: Send, Erase and the link checkbox disabled; state "No reply"', noFw.send && noFw.erase && noFw.link && noFw.state === 'No reply', JSON.stringify(noFw));
+await pg.click('#btnUnitToFw'); await pg.waitForTimeout(300);
+check('D21: Go to Firmware update opens the box', await pg.evaluate(() => { const r = document.getElementById('pgFirmware').getBoundingClientRect(); return document.body.dataset.tab === 'setup' && r.top < innerHeight && r.bottom > 0; }));
+await line({ type: 'bikeState', profile: 'yamaha-yconnect', state: 'off', keySet: false }); await pg.waitForTimeout(100);
+check('D21: a later bikeState clears the message', await pg.isHidden('#unitNoFw') && !(await pg.isDisabled('#btnKeySave')));
 check('no page errors', errors.length === 0, errors.join(' | '));
 
 await browser.close(); server.close();

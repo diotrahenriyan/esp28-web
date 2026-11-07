@@ -1,4 +1,4 @@
-// In-app monthly Google limit: at 90 % of a SKU's free amount the app must not call Google for it.
+// In-app monthly Google limit: at 99 % of a SKU's free amount the app must not call Google for it.
 // Run from the repo root: node tests/google-cap.mjs   (needs Playwright + Chromium)
 import { createRequire } from 'node:module';
 import http from 'node:http';
